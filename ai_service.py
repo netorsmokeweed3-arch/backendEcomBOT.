@@ -26,7 +26,7 @@ def process_order_and_chat_with_ai(order_data, chat_messages):
 
     try:
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-5-5",
             max_tokens=1000,
             messages=[
                 {"role": "user", "content": prompt}
