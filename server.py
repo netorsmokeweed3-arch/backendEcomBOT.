@@ -5,41 +5,53 @@ from ai_service import process_order_and_chat_with_ai
 
 app = Flask(__name__)
 
-# Твій токен доступу до Prom.ua API
-PROM_TOKEN = "3f7ee5349834e4721e43904eb1119c94db65a83c"
-PROM_API_URL = "https://my.prom.ua/api/v1/orders/list"
-
 @app.route("/")
 def home():
-    return "EcomBot Backend with AI is running successfully! 🚀"
+    return "EcomBot Multi-Store Backend is running successfully! 🚀"
 
-# Маршрут для отримання замовлень з Prom.ua
-@app.route("/api/orders", methods=["GET"])
+# Універсальний маршрут для отримання замовлень із будь-якого магазину Shopify
+@app.route("/api/orders", methods=["POST", "GET"])
 def get_orders():
+    # 1. Ловимо магазин і токен, які прилетіли з мобільного додатка
+    # Додаток може передавати їх через query-параметри або в JSON-тілі запиту
+    shop_domain = request.args.get("shop") or (request.json and request.json.get("shop"))
+    access_token = request.args.get("token") or (request.json and request.json.get("token"))
+    
+    # Якщо з якихось причин додаток не передав їх, видаємо помилку для безпеки
+    if not shop_domain or not access_token:
+        return jsonify({
+            "success": False,
+            "message": "Не вказано назву магазину або API-токен!"
+        }, 400)
+
+    # 2. Формуємо динамічний URL для Shopify API конкретного користувача
+    shopify_api_url = f"https://{shop_domain}.myshopify.com/admin/api/2024-01/orders.json?status=any"
+    
     headers = {
-        "Authorization": f"Bearer {PROM_TOKEN}",
+        "X-Shopify-Access-Token": access_token,
         "Content-Type": "application/json",
     }
 
     try:
-        response = requests.get(PROM_API_URL, headers=headers)
+        # 3. Робимо запит до Shopify від імені цього магазину
+        response = requests.get(shopify_api_url, headers=headers)
 
         if response.status_code == 200:
             data = response.json()
             orders = data.get("orders", [])
             return jsonify({"success": True, "orders": orders})
         else:
-            print(f"Помилка Prom API: {response.status_code}, {response.text}")
+            print(f"Помилка Shopify API для магазину {shop_domain}: {response.status_code}, {response.text}")
             return jsonify({
                 "success": False,
-                "message": f"Помилка від Prom API: {response.status_code}"
-            }, 500)
+                "message": f"Помилка від Shopify API: {response.status_code}. Перевірте правильність токена чи назви магазину."
+            }, 400)
 
     except Exception as e:
-        print(f"Виняток при запиті до Пром: {e}")
+        print(f"Виняток при запиті до Shopify: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-# Маршрут для обробки замовлень та чатів через Claude Haiku через той самий сервер
+# Маршрут для обробки замовлень через Claude залишається незмінним
 @app.route("/api/process-ai", methods=["POST"])
 def process_ai():
     try:
@@ -47,7 +59,6 @@ def process_ai():
         order_data = req_data.get("order_data", "")
         chat_messages = req_data.get("chat_messages", "")
 
-        # Викликаємо функцію штучного інтелекту з ai_service.py
         ai_response = process_order_and_chat_with_ai(order_data, chat_messages)
 
         return jsonify({
