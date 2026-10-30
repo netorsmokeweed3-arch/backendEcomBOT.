@@ -1,3 +1,4 @@
+import json
 from flask import Flask, jsonify, request
 
 from ai_service import analyze_order
@@ -6,7 +7,7 @@ from order_normalizer import OrderAPIError, fetch_orders, normalize_order, norma
 app = Flask(__name__)
 
 # Версія бекенду для оновлення індексу Git та перевірки розгортання
-BACKEND_VERSION = "2.2.1-fixed"
+BACKEND_VERSION = "2.2.2-debug"
 
 
 def read_body() -> dict:
@@ -56,6 +57,10 @@ def process_ai():
         body = read_body()
         shop, _token = read_credentials(body)
         order_data = body.get("order_data")
+        
+        # ДІАГНОСТИКА: виводимо в логи Render усе, що надсилає фронтенд
+        print(f"[DEBUG RAW ORDER_DATA RECEIVED]: {json.dumps(order_data, ensure_ascii=False)}", flush=True)
+
         if not isinstance(order_data, dict):
             raise OrderAPIError("Не передано дані замовлення (order_data).", 400)
 
