@@ -5,6 +5,9 @@ from order_normalizer import OrderAPIError, fetch_orders, normalize_order, norma
 
 app = Flask(__name__)
 
+# Версія бекенду для оновлення індексу Git та перевірки розгортання
+BACKEND_VERSION = "2.0.1-fixed"
+
 
 def read_body() -> dict:
     """JSON-тіло запиту; для GET беремо query-параметри."""
@@ -31,7 +34,7 @@ def error_response(error: Exception):
 
 @app.route("/")
 def home():
-    return "EcomBot Multi-Store Backend is running successfully! 🚀"
+    return f"EcomBot Multi-Store Backend is running successfully! (v: {BACKEND_VERSION}) 🚀"
 
 
 @app.route("/api/orders", methods=["POST", "GET"])
