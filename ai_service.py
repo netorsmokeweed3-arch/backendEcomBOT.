@@ -1,15 +1,24 @@
 import json
 import os
+import logging
 import anthropic
+
+# Налаштування професійного логування
+logger = logging.getLogger(__name__)
 
 # Зчитуємо API-ключ зі змінних оточення сервера
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 if not ANTHROPIC_API_KEY:
-    print("[WARNING] ANTHROPIC_API_KEY не задано у змінних оточення!")
+    logger.warning("[WARNING] ANTHROPIC_API_KEY не задано у змінних оточення!")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# Ініціалізація клієнта Anthropic з фіксованим таймаутом (30 секунд) для запобігання зависань
+client = anthropic.Anthropic(
+    api_key=ANTHROPIC_API_KEY,
+    timeout=30.0
+)
 
-MODEL = "claude-haiku-5-5"
+# Модель за замовчуванням (можна змінити через змінні середовища)
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022") 
 MAX_RESPONSE_LENGTH = 15000  # Захист від завеликих відповідей
 
 SYSTEM_PROMPT = """Ти — система обробки замовлень. Твоя відповідь — ЛИШЕ сирий JSON-об'єкт.
@@ -55,7 +64,7 @@ camelCase-варіанти. Для телефону перевір адресу 
   "ai_summary": string
 }
 ai_summary: один короткий опис наявного статусу, 1–2 речення, без порад.
-Якщо значення немає у вхідному замовленні, використовуй порожній рядок або [] (кількість — 0)."""
+Если значення немає у вхідному замовленні, використовуй порожній рядок або [] (кількість — 0)."""
 
 
 def build_user_message(order: dict, chat_messages: str) -> str:
@@ -70,25 +79,27 @@ def build_user_message(order: dict, chat_messages: str) -> str:
 
 
 def parse_json_object(text: str) -> dict:
-    """Безпечно витягує перший JSON-об'єкт з перевіркою довжини та типів."""
+    """Безпечно витягує перший дійсний JSON-об'єкт із перевіркою довжини та типів."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Отримано порожню відповідь від ШІ.")
     
     if len(text) > MAX_RESPONSE_LENGTH:
         raise ValueError("Відповідь ШІ перевищує допустимий ліміт довжини.")
 
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("У відповіді ШІ немає JSON-об'єкта.")
+    start = text.find("{")
+    end = text.rfind("}")
+    
+    if start == -1 or end == -1 or start > end:
+        raise ValueError("У відповіді ШІ немає валідного JSON-об'єкта.")
     
     parsed = json.loads(text[start : end + 1])
     if not isinstance(parsed, dict):
-        raise ValueError("JSON від ШІ не є об'єктом.")
+        raise ValueError("Розпарснений JSON від ШІ не є словником (об'єктом).")
     return parsed
 
 
 def standard_fields(order: dict) -> dict:
-    """Факти беремо з нормалізованого замовлення, гарантуючи захист від невалідних типів."""
+    """Витягує базові факти з нормалізованого замовлення із суворим захистом від невалідних типів."""
     safe_order = order if isinstance(order, dict) else {}
     address = safe_order.get("delivery_address") or safe_order.get("shipping_address") or {}
     total = safe_order.get("total_amount") or {}
@@ -156,7 +167,6 @@ def standard_fields(order: dict) -> dict:
             "item_id": str(item.get("item_id", "") or item.get("id", "")),
         })
 
-    # СУВОРО ЗАБОРОНЕНО брати номер замовлення (name) як ім'я клієнта
     customer_name = str(safe_order.get("customer_name") or "")
 
     return {
@@ -193,7 +203,6 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
     ):
         value = extracted.get(field)
         if not report.get(field) and isinstance(value, str) and value.strip():
-            # Додатковий запобіжник: якщо раптом ШІ спробує запхати номер замовлення в ім'я
             if field == "customer_name" and value.strip().startswith("#"):
                 continue
             report[field] = value.strip()
@@ -222,7 +231,7 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
 
 
 def analyze_order(order: dict, chat_messages: str) -> dict:
-    """Головна точка входу: безпечний аналіз та збирання замовлення."""
+    """Головна точка входу: безпечний аналіз та збирання замовлення через Claude."""
     report = standard_fields(order)
 
     try:
@@ -235,13 +244,21 @@ def analyze_order(order: dict, chat_messages: str) -> dict:
         response_text = "".join(block.text for block in response.content if hasattr(block, "text"))
         extracted = parse_json_object(response_text)
         fill_missing_fields(report, extracted)
+        
         summary = extracted.get("ai_summary")
-        report["ai_summary"] = summary.strip() if isinstance(summary, str) else ""
+        report["ai_summary"] = " ".join(summary.split()) if isinstance(summary, str) else ""
+        
     except (ValueError, json.JSONDecodeError) as error:
-        print(f"[ERROR] Помилка обробки відповіді Claude: {error}")
+        logger.error("[ERROR] Помилка обробки відповіді Claude: %s", error)
         report["ai_summary"] = "ШІ не зміг сформувати статус. Перевірте замовлення вручну."
+    except anthropic.RateLimitError:
+        logger.error("[ERROR] Перевищено ліміт запитів до Anthropic API (Rate Limit).")
+        report["ai_summary"] = "ШІ перевантажений. Спробуйте через хвилину."
+    except anthropic.APIError as error:
+        logger.error("[ERROR] Помилка Anthropic API: %s", error)
+        report["ai_summary"] = "Помилка зв'язку з сервером ШІ."
     except Exception as error:
-        print(f"[ERROR] Критична помилка при зверненні до Claude API: {error}")
+        logger.error("[ERROR] Критична помилка при зверненні до Claude API: %s", error, exc_info=True)
         report["ai_summary"] = "ШІ тимчасово недоступний. Спробуйте пізніше."
 
     return report

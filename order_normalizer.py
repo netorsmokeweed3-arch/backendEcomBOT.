@@ -5,9 +5,20 @@
 у вкладених об'єктах (customer.first_name, buyer.name, shipping_address.city тощо).
 """
 import re
+from functools import lru_cache
 from typing import Any, Optional
-
 import requests
+
+# Константи для безпечної перевірки порожніх значень
+EMPTY = {None, "", [], {}, "None", "null", "N/A", "n/a"}
+
+# Базові префікси для форматування валют
+CURRENCY_PREFIX = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "UAH": "₴"
+}
 
 FIELD_SYNONYMS = {
     "order_number": [
@@ -173,9 +184,6 @@ FIELD_SYNONYMS = {
     ],
 }
 
-CURRENCY_PREFIX = {"USD": "$", "EUR": "€", "GBP": "£"}
-EMPTY = (None, "", [], {})
-
 
 class OrderAPIError(Exception):
     def __init__(self, message: str, status: int = 400):
@@ -194,9 +202,15 @@ def normalize_shop(raw: Any) -> Optional[str]:
     return value
 
 
+@lru_cache(maxsize=128)
+def _cached_split_path(path: str) -> tuple:
+    """Кешування розбиття шляху для прискорення пошуку у вкладених структурах."""
+    return tuple(path.split("."))
+
+
 def get_path(data: Any, path: str) -> Any:
     current = data
-    for part in path.split("."):
+    for part in _cached_split_path(path):
         if isinstance(current, dict):
             current = current.get(part)
         elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
@@ -207,7 +221,7 @@ def get_path(data: Any, path: str) -> Any:
 
 
 def find(data: Any, field: str) -> Any:
-    for path in FIELD_SYNONYMS[field]:
+    for path in FIELD_SYNONYMS.get(field, []):
         value = get_path(data, path)
         if value is not None:
             return value
@@ -279,7 +293,11 @@ def string_address(raw: Any) -> str:
     return ""
 
 
-def deep_find(data: Any, hints: tuple) -> str:
+def deep_find(data: Any, hints: tuple, max_depth: int = 3, current_depth: int = 0) -> str:
+    """Глибокий пошук з обмеженням глибини для запобігання переповнення стеку."""
+    if current_depth > max_depth:
+        return ""
+        
     if isinstance(data, dict):
         for key, value in data.items():
             if any(hint in str(key).lower() for hint in hints) and to_text(value):
@@ -289,9 +307,10 @@ def deep_find(data: Any, hints: tuple) -> str:
         candidates = data
     else:
         return ""
+        
     for value in candidates:
         if isinstance(value, (dict, list)):
-            found = deep_find(value, hints)
+            found = deep_find(value, hints, max_depth, current_depth + 1)
             if found:
                 return found
     return ""
@@ -300,7 +319,6 @@ def deep_find(data: Any, hints: tuple) -> str:
 def normalize_order(raw: dict, shop: str) -> dict:
     currency = to_text(find(raw, "currency")) or "UAH"
 
-    # Жорсткий збір імені з customer або shipping_address
     first = (
         to_text(find(raw, "first_name")) 
         or to_text(get_path(raw, "customer.first_name")) 
@@ -392,15 +410,22 @@ def shopify_error(status_code: int, shop: str) -> OrderAPIError:
 def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
     try:
         response = requests.get(url, headers=headers, timeout=25)
+    except requests.Timeout as error:
+        raise OrderAPIError(f"Час очікування запиту до магазину «{shop}» вичерпано.", 504) from error
     except requests.RequestException as error:
         raise OrderAPIError(f"Не вдалося підключитися до магазину «{shop}».", 502) from error
 
     if response.status_code != 200:
         raise shopify_error(response.status_code, shop)
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise OrderAPIError(f"Магазин «{shop}» повернув невалідний JSON.", 502) from error
+
     if isinstance(data, list):
         return data
     return data.get("orders") or data.get("data") or data.get("items") or []
