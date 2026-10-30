@@ -6,7 +6,7 @@ from order_normalizer import OrderAPIError, fetch_orders, normalize_order, norma
 app = Flask(__name__)
 
 # Версія бекенду для оновлення індексу Git та перевірки розгортання
-BACKEND_VERSION = "2.0.1-fixed"
+BACKEND_VERSION = "2.2.1-fixed"
 
 
 def read_body() -> dict:
