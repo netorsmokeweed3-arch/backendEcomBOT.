@@ -10,7 +10,6 @@ from typing import Any, Optional
 import requests
 
 # Синоніми полів: перший знайдений у замовленні виграє. Шлях може бути вкладеним через крапку.
-# Синоніми полів: перший знайдений у замовленні виграє. Шлях може бути вкладеним через крапку.
 FIELD_SYNONYMS = {
     "order_number": [
         "order_number", "orderNumber", "number", "name", "order_id", "id", 
@@ -29,8 +28,8 @@ FIELD_SYNONYMS = {
         "creation_date", "creationDate", "placed_at", "placedAt", "order_date_added"
     ],
     "customer_name": [
-        "customer_name", "customerName", "client_name", "buyer_name", "full_name", "fullName",
-        "customer.full_name", "customer.fullName", "customer.name", "buyer.full_name",
+        "customer.full_name", "customer.fullName", "customer.name", "customer_name", "customerName",
+        "client_name", "buyer_name", "full_name", "fullName", "buyer.full_name",
         "buyer.name", "client.name", "recipient_name", "shipping_address.name", "shippingAddress.name",
         "billing_address.name", "billingAddress.name", "shipping_name", "billing_name",
         "contact_name", "contactName", "receiver", "recipient", "customer_fullname",
@@ -194,7 +193,6 @@ def normalize_shop(raw: Any) -> Optional[str]:
     value = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
     if not value:
         return None
-    # Shopify-домен без ".myshopify.com" (наприклад, лише назва магазину) не резолвиться в DNS
     if "." not in value:
         value = f"{value}.myshopify.com"
     return value
@@ -278,7 +276,7 @@ def normalize_items(raw_items: Any, currency: str) -> list:
 
 
 def string_address(raw: Any) -> str:
-    """Адреса, що прийшла одним рядком (наприклад, delivery_address: 'вул. Центральна, 15')."""
+    """Адреса, що прийшла одним рядком."""
     if not isinstance(raw, dict):
         return ""
     for key in ("delivery_address", "deliveryAddress", "shipping_address", "shippingAddress", "address"):
@@ -289,7 +287,7 @@ def string_address(raw: Any) -> str:
 
 
 def deep_find(data: Any, hints: tuple) -> str:
-    """Рекурсивно шукає непорожнє значення, ключ якого містить одну з підказок (наприклад, 'phone')."""
+    """Рекурсивно шукає непорожнє значення за підказками."""
     if isinstance(data, dict):
         for key, value in data.items():
             if any(hint in str(key).lower() for hint in hints) and to_text(value):
@@ -311,8 +309,9 @@ def normalize_order(raw: dict, shop: str) -> dict:
     """Стандартне замовлення незалежно від назв полів у сирому JSON."""
     currency = to_text(find(raw, "currency")) or "UAH"
 
-    first = to_text(find(raw, "first_name"))
-    last = to_text(find(raw, "last_name"))
+    # Гарантоване збирання імені з customer або з окремих полів першого/останнього імені
+    first = to_text(find(raw, "first_name")) or to_text(get_path(raw, "customer.first_name"))
+    last = to_text(find(raw, "last_name")) or to_text(get_path(raw, "customer.last_name"))
     customer_name = " ".join(part for part in (first, last) if part) or to_text(find(raw, "customer_name"))
 
     street = " ".join(part for part in (to_text(find(raw, "street")), to_text(find(raw, "street2"))) if part)
@@ -321,8 +320,22 @@ def normalize_order(raw: dict, shop: str) -> dict:
     region = to_text(find(raw, "region"))
     postal_code = to_text(find(raw, "postal_code"))
     country = to_text(find(raw, "country"))
-    # Порядок: країна, область, місто, вулиця/будинок, індекс
+    
     full_address = ", ".join(part for part in (country, region, city, street, postal_code) if part)
+
+    # Гарантоване витягування телефону з урахуванням Shopify-структури (shipping_address або customer)
+    phone = (
+        to_text(find(raw, "phone")) 
+        or to_text(get_path(raw, "shipping_address.phone")) 
+        or to_text(get_path(raw, "customer.phone"))
+        or deep_find(raw, ("phone",))
+    )
+
+    email = (
+        to_text(find(raw, "email"))
+        or to_text(get_path(raw, "customer.email"))
+        or deep_find(raw, ("email",))
+    )
 
     return {
         "shop": shop,
@@ -331,8 +344,8 @@ def normalize_order(raw: dict, shop: str) -> dict:
         "created_at": to_text(find(raw, "created_at")),
         "currency": currency.upper(),
         "customer_name": customer_name,
-        "phone": to_text(find(raw, "phone")) or deep_find(raw, ("phone",)),
-        "email": to_text(find(raw, "email")) or deep_find(raw, ("email",)),
+        "phone": phone,
+        "email": email,
         "delivery_method": to_text(find(raw, "delivery_method")),
         "delivery_address": {
             "street": street,
@@ -351,10 +364,7 @@ def normalize_order(raw: dict, shop: str) -> dict:
     }
 
 
-
-
 def shopify_error(status_code: int, shop: str) -> OrderAPIError:
-    """Зрозуміле повідомлення для HTTP-відповіді Shopify; статус віддаємо клієнту."""
     if status_code == 401:
         return OrderAPIError(
             f"Невірний або недійсний API-токен для магазину «{shop}». Оновіть токен в адмін-панелі Shopify.", 401
@@ -372,14 +382,7 @@ def shopify_error(status_code: int, shop: str) -> OrderAPIError:
 
 
 def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
-    """Завантажує сирі замовлення з API магазину.
-
-    Якщо orders_url не задано, використовується Shopify-сумісний шлях
-    https://<shop>/admin/api/2024-01/orders.json. Для інших сайтів передайте orders_url.
-    """
-    # 2024-01 більше не підтримується Shopify (запити переадресовуються на старішу версію), тому оновлено
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
-    # Shopify вимагає X-Shopify-Access-Token; Bearer лишаємо для сумісності з іншими API
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
     print(f"[DEBUG] Запит до магазину: GET {url}", flush=True)
     try:
@@ -393,7 +396,6 @@ def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> lis
         raise OrderAPIError(message, 502) from error
 
     if response.status_code != 200:
-        # Точний текст відповіді Shopify: видно, чи причина в токені, URL або правах
         print(f"[DEBUG] Shopify відповів {response.status_code} для {url}: {response.text}", flush=True)
         raise shopify_error(response.status_code, shop)
 
