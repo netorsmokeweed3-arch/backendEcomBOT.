@@ -1,0 +1,34 @@
+{
+  "id": 450789469,
+  "order_number": 1001,
+  "name": "#1001",
+  "created_at": "2026-10-30T10:00:00+00:00",
+  "currency": "USD",
+  "total_price": "749.95",
+  "financial_status": "paid",
+  "fulfillment_status": null,
+  "customer": {
+    "id": 207119551,
+    "first_name": "Andrii",
+    "last_name": "Bolshakov",
+    "email": "andrii@example.com",
+    "phone": "+15035550199"
+  },
+  "shipping_address": {
+    "first_name": "Andrii",
+    "last_name": "Bolshakov",
+    "phone": "+1 503-555-0199",
+    "address1": "Verbutskogo 15/11",
+    "address2": "",
+    "city": "Portland",
+    "province": "Oregon",
+    "province_code": "OR",
+    "zip": "97201",
+    "country": "United States",
+    "country_code": "US"
+  },
+  "shipping_lines": [{"title": "Standard Shipping"}],
+  "line_items": [
+    {"id": 1, "title": "Desk Lamp", "variant_title": "Default Title", "sku": "LAMP-01", "quantity": 1, "price": "749.95"}
+  ]
+}

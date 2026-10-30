@@ -16,6 +16,9 @@ def read_credentials(body: dict):
     """Назва магазину і токен з запиту. Нічого не захардкоджено."""
     shop = normalize_shop(body.get("shop") or body.get("shop_domain"))
     token = body.get("token") or body.get("access_token")
+    # Діагностика: токен не виводимо, лише довжину та префікс для перевірки формату
+    print(f"[DEBUG] Вхідні дані: shop={shop!r}, token_len={len(token) if isinstance(token, str) else 'N/A'}, "
+          f"token_prefix={token[:6] if isinstance(token, str) else 'N/A'}", flush=True)
     if not shop or not token:
         raise OrderAPIError("Потрібно передати назву магазину (shop) і API-токен (token).", 400)
     return shop, token

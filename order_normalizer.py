@@ -72,11 +72,16 @@ class OrderAPIError(Exception):
 
 
 def normalize_shop(raw: Any) -> Optional[str]:
-    """'https://My-Store.myshopify.com/' -> 'my-store.myshopify.com'; порожнє -> None."""
+    """'https://My-Store.myshopify.com/' -> 'my-store.myshopify.com'; 'my-store' -> 'my-store.myshopify.com'."""
     if not isinstance(raw, str):
         return None
     value = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
-    return value or None
+    if not value:
+        return None
+    # Shopify-домен без ".myshopify.com" (наприклад, лише назва магазину) не резолвиться в DNS
+    if "." not in value:
+        value = f"{value}.myshopify.com"
+    return value
 
 
 def get_path(data: Any, path: str) -> Any:
@@ -230,22 +235,51 @@ def normalize_order(raw: dict, shop: str) -> dict:
     }
 
 
+
+
+def shopify_error(status_code: int, shop: str) -> OrderAPIError:
+    """Зрозуміле повідомлення для HTTP-відповіді Shopify; статус віддаємо клієнту."""
+    if status_code == 401:
+        return OrderAPIError(
+            f"Невірний або недійсний API-токен для магазину «{shop}». Оновіть токен в адмін-панелі Shopify.", 401
+        )
+    if status_code == 403:
+        return OrderAPIError(
+            f"Токен для магазину «{shop}» не має необхідних прав: увімкніть доступ read_orders "
+            "(Settings → Apps → Admin API) і згенеруйте токен заново.", 403
+        )
+    if status_code == 404:
+        return OrderAPIError(f"Магазин «{shop}» не знайдено. Перевірте назву магазину.", 404)
+    if status_code == 429:
+        return OrderAPIError(f"Магазин «{shop}» тимчасово обмежив запити. Спробуйте пізніше.", 429)
+    return OrderAPIError(f"Помилка API магазину «{shop}»: код {status_code}.", 502)
+
+
 def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
     """Завантажує сирі замовлення з API магазину.
 
     Якщо orders_url не задано, використовується Shopify-сумісний шлях
     https://<shop>/admin/api/2024-01/orders.json. Для інших сайтів передайте orders_url.
     """
-    url = orders_url or f"https://{shop}/admin/api/2024-01/orders.json?status=any"
+    # 2024-01 більше не підтримується Shopify (запити переадресовуються на старішу версію), тому оновлено
+    url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
+    # Shopify вимагає X-Shopify-Access-Token; Bearer лишаємо для сумісності з іншими API
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
+    print(f"[DEBUG] Запит до магазину: GET {url}", flush=True)
     try:
         response = requests.get(url, headers=headers, timeout=25)
     except requests.RequestException as error:
-        raise OrderAPIError("Не вдалося зв'язатися з API магазину.", 502) from error
+        print(f"[DEBUG] Помилка мережі до {url}: {type(error).__name__}: {error}", flush=True)
+        message = (
+            f"Не вдалося підключитися до магазину «{shop}». Перевірте назву магазину "
+            "(наприклад, my-store або my-store.myshopify.com) і з'єднання з інтернетом."
+        )
+        raise OrderAPIError(message, 502) from error
 
     if response.status_code != 200:
-        print(f"Помилка API магазину {shop}: {response.status_code}, {response.text}")
-        raise OrderAPIError(f"Помилка від API магазину: {response.status_code}", 400)
+        # Точний текст відповіді Shopify: видно, чи причина в токені, URL або правах
+        print(f"[DEBUG] Shopify відповів {response.status_code} для {url}: {response.text}", flush=True)
+        raise shopify_error(response.status_code, shop)
 
     data = response.json()
     if isinstance(data, list):
