@@ -15,10 +15,16 @@ MAX_RESPONSE_LENGTH = 15000  # Захист від завеликих відпо
 SYSTEM_PROMPT = """Ти — система обробки замовлень. Твоя відповідь — ЛИШЕ сирий JSON-об'єкт.
 Заборонено: markdown, коментарі, пояснення, поради, текст до або після JSON.
 Пам'ятай, що різні платформи (Shopify, Prom, Розетка тощо) надсилають дані у різних форматах та з різними назвами ключів.
-Шукай ім'я (customer_name/name), телефон (phone/telephone), повну адресу (delivery_address), статус (status), 
-помітки (note/comments), платіжний шлюз (payment_gateway) та товари у будь-яких структурах вхідного JSON.
-Ніколи не придумуй значення: якщо поле відсутнє у всіх структурах замовлення, поверни для нього порожній рядок або [].
-Для кожного товару поверни назву (title), кількість (quantity), суму рядка (line_total), артикул (sku) та ID.
+Шукай ім'я (customer_name/name), телефон (phone/telephone) та повну адресу (delivery_address/shipping_address)
+у будь-яких можливих вкладених структурах вхідного JSON замовлення і завжди повертай їх у єдиному стандартному форматі.
+Ніколи не придумуй значення: якщо поле відсутнє у всіх структурах замовлення, поверни для нього порожній рядок.
+Витягни дані саме із структурованого замовлення. Воно може містити поля Shopify
+(customer, shipping_address, line_items, total_price), вже нормалізовані поля або їх
+camelCase-варіанти. Для телефону перевір адресу доставки, customer/buyer і саме замовлення.
+Для адреси об'єднай вулицю, квартиру, місто, область/штат, поштовий індекс і країну.
+Для кожного товару поверни назву, кількість і суму рядка; використовуй передану суму рядка,
+а якщо її немає — ціну за одиницю та кількість. Суми і валюти копіюй із замовлення.
+Історія чату не є джерелом фактів замовлення. Не виводь і не припускай відсутні значення.
 Схема (усі ключі обов'язкові, типи строгі):
 {
   "customer_name": string,
@@ -48,7 +54,8 @@ SYSTEM_PROMPT = """Ти — система обробки замовлень. Т
   ],
   "ai_summary": string
 }
-ai_summary: один короткий опис наявного статусу, 1–2 речення, без порад."""
+ai_summary: один короткий опис наявного статусу, 1–2 речення, без порад.
+Якщо значення немає у вхідному замовленні, використовуй порожній рядок або [] (кількість — 0)."""
 
 
 def build_user_message(order: dict, chat_messages: str) -> str:
@@ -149,8 +156,11 @@ def standard_fields(order: dict) -> dict:
             "item_id": str(item.get("item_id", "") or item.get("id", "")),
         })
 
+    # СУВОРО ЗАБОРОНЕНО брати номер замовлення (name) як ім'я клієнта
+    customer_name = str(safe_order.get("customer_name") or "")
+
     return {
-        "customer_name": str(safe_order.get("customer_name") or safe_order.get("name", "")),
+        "customer_name": customer_name,
         "phone": str(safe_order.get("phone", "")),
         "email": str(safe_order.get("email", "")),
         "delivery_address": full_address,
@@ -183,6 +193,9 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
     ):
         value = extracted.get(field)
         if not report.get(field) and isinstance(value, str) and value.strip():
+            # Додатковий запобіжник: якщо раптом ШІ спробує запхати номер замовлення в ім'я
+            if field == "customer_name" and value.strip().startswith("#"):
+                continue
             report[field] = value.strip()
 
     if isinstance(extracted.get("cancelled"), bool):

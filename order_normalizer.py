@@ -9,7 +9,6 @@ from typing import Any, Optional
 
 import requests
 
-# Синоніми полів: перший знайдений у замовленні виграє. Шлях може бути вкладеним через крапку.
 FIELD_SYNONYMS = {
     "order_number": [
         "order_number", "orderNumber", "number", "name", "order_id", "id", 
@@ -42,7 +41,7 @@ FIELD_SYNONYMS = {
         "customer.first_name", "customer.firstName", "buyer.first_name", "client.first_name",
         "shipping_address.first_name", "shippingAddress.first_name", "billing_address.first_name", "billingAddress.first_name",
         "client_first_name", "first_name", "firstName", "shipping_firstname", "billing_firstname",
-        "fname", "given_name", "givenName", "name", "imya", "customer_firstname", "buyer_firstname",
+        "fname", "given_name", "givenName", "imya", "customer_firstname", "buyer_firstname",
         "customer.fname", "buyer.fname", "shipping_address.fname", "billing_address.fname", "client_fname"
     ],
     "last_name": [
@@ -179,15 +178,12 @@ EMPTY = (None, "", [], {})
 
 
 class OrderAPIError(Exception):
-    """Помилка роботи з API магазину; status — HTTP-код для відповіді клієнту."""
-
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
 
 
 def normalize_shop(raw: Any) -> Optional[str]:
-    """'https://My-Store.myshopify.com/' -> 'my-store.myshopify.com'; 'my-store' -> 'my-store.myshopify.com'."""
     if not isinstance(raw, str):
         return None
     value = re.sub(r"^https?://", "", raw.strip().lower()).split("/")[0]
@@ -199,7 +195,6 @@ def normalize_shop(raw: Any) -> Optional[str]:
 
 
 def get_path(data: Any, path: str) -> Any:
-    """Дістає значення за шляхом 'a.b.0.c'; повертає None, якщо шляху немає."""
     current = data
     for part in path.split("."):
         if isinstance(current, dict):
@@ -212,7 +207,6 @@ def get_path(data: Any, path: str) -> Any:
 
 
 def find(data: Any, field: str) -> Any:
-    """Перше непорожнє значення за синонімами поля."""
     for path in FIELD_SYNONYMS[field]:
         value = get_path(data, path)
         if value is not None:
@@ -276,7 +270,6 @@ def normalize_items(raw_items: Any, currency: str) -> list:
 
 
 def string_address(raw: Any) -> str:
-    """Адреса, що прийшла одним рядком."""
     if not isinstance(raw, dict):
         return ""
     for key in ("delivery_address", "deliveryAddress", "shipping_address", "shippingAddress", "address"):
@@ -287,7 +280,6 @@ def string_address(raw: Any) -> str:
 
 
 def deep_find(data: Any, hints: tuple) -> str:
-    """Рекурсивно шукає непорожнє значення за підказками."""
     if isinstance(data, dict):
         for key, value in data.items():
             if any(hint in str(key).lower() for hint in hints) and to_text(value):
@@ -306,34 +298,55 @@ def deep_find(data: Any, hints: tuple) -> str:
 
 
 def normalize_order(raw: dict, shop: str) -> dict:
-    """Стандартне замовлення незалежно від назв полів у сирому JSON."""
     currency = to_text(find(raw, "currency")) or "UAH"
 
-    # Гарантоване збирання імені з customer або з окремих полів першого/останнього імені
-    first = to_text(find(raw, "first_name")) or to_text(get_path(raw, "customer.first_name"))
-    last = to_text(find(raw, "last_name")) or to_text(get_path(raw, "customer.last_name"))
-    customer_name = " ".join(part for part in (first, last) if part) or to_text(find(raw, "customer_name"))
+    # Жорсткий збір імені з customer або shipping_address
+    first = (
+        to_text(find(raw, "first_name")) 
+        or to_text(get_path(raw, "customer.first_name")) 
+        or to_text(get_path(raw, "shipping_address.first_name"))
+    )
+    last = (
+        to_text(find(raw, "last_name")) 
+        or to_text(get_path(raw, "customer.last_name")) 
+        or to_text(get_path(raw, "shipping_address.last_name"))
+    )
+    customer_name = (
+        " ".join(part for part in (first, last) if part) 
+        or to_text(get_path(raw, "customer.name"))
+        or to_text(get_path(raw, "shipping_address.name"))
+        or to_text(find(raw, "customer_name"))
+    )
 
-    street = " ".join(part for part in (to_text(find(raw, "street")), to_text(find(raw, "street2"))) if part)
-    street = street or string_address(raw)
-    city = to_text(find(raw, "city"))
-    region = to_text(find(raw, "region"))
-    postal_code = to_text(find(raw, "postal_code"))
-    country = to_text(find(raw, "country"))
+    street = (
+        to_text(get_path(raw, "shipping_address.address1")) 
+        or to_text(get_path(raw, "shipping_address.street")) 
+        or to_text(find(raw, "street"))
+    )
+    street2 = (
+        to_text(get_path(raw, "shipping_address.address2")) 
+        or to_text(find(raw, "street2"))
+    )
+    full_street = " ".join(part for part in (street, street2) if part) or string_address(raw)
+
+    city = to_text(get_path(raw, "shipping_address.city")) or to_text(find(raw, "city"))
+    region = to_text(get_path(raw, "shipping_address.province")) or to_text(get_path(raw, "shipping_address.state")) or to_text(find(raw, "region"))
+    postal_code = to_text(get_path(raw, "shipping_address.zip")) or to_text(get_path(raw, "shipping_address.postal_code")) or to_text(find(raw, "postal_code"))
+    country = to_text(get_path(raw, "shipping_address.country")) or to_text(find(raw, "country"))
     
-    full_address = ", ".join(part for part in (country, region, city, street, postal_code) if part)
+    full_address = ", ".join(part for part in (country, region, city, full_street, postal_code) if part)
 
-    # Гарантоване витягування телефону з урахуванням Shopify-структури (shipping_address або customer)
     phone = (
-        to_text(find(raw, "phone")) 
-        or to_text(get_path(raw, "shipping_address.phone")) 
+        to_text(get_path(raw, "shipping_address.phone")) 
         or to_text(get_path(raw, "customer.phone"))
+        or to_text(find(raw, "phone")) 
         or deep_find(raw, ("phone",))
     )
 
     email = (
-        to_text(find(raw, "email"))
-        or to_text(get_path(raw, "customer.email"))
+        to_text(get_path(raw, "customer.email"))
+        or to_text(get_path(raw, "shipping_address.email"))
+        or to_text(find(raw, "email")) 
         or deep_find(raw, ("email",))
     )
 
@@ -348,7 +361,7 @@ def normalize_order(raw: dict, shop: str) -> dict:
         "email": email,
         "delivery_method": to_text(find(raw, "delivery_method")),
         "delivery_address": {
-            "street": street,
+            "street": full_street,
             "city": city,
             "region": region,
             "postal_code": postal_code,
@@ -366,37 +379,25 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
 def shopify_error(status_code: int, shop: str) -> OrderAPIError:
     if status_code == 401:
-        return OrderAPIError(
-            f"Невірний або недійсний API-токен для магазину «{shop}». Оновіть токен в адмін-панелі Shopify.", 401
-        )
+        return OrderAPIError(f"Невірний або недійсний API-токен для магазину «{shop}».", 401)
     if status_code == 403:
-        return OrderAPIError(
-            f"Токен для магазину «{shop}» не має необхідних прав: увімкніть доступ read_orders "
-            "(Settings → Apps → Admin API) і згенеруйте токен заново.", 403
-        )
+        return OrderAPIError(f"Токен для магазину «{shop}» не має необхідних прав (read_orders).", 403)
     if status_code == 404:
-        return OrderAPIError(f"Магазин «{shop}» не знайдено. Перевірте назву магазину.", 404)
+        return OrderAPIError(f"Магазин «{shop}» не знайдено.", 404)
     if status_code == 429:
-        return OrderAPIError(f"Магазин «{shop}» тимчасово обмежив запити. Спробуйте пізніше.", 429)
+        return OrderAPIError(f"Магазин «{shop}» тимчасово обмежив запити.", 429)
     return OrderAPIError(f"Помилка API магазину «{shop}»: код {status_code}.", 502)
 
 
 def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
-    print(f"[DEBUG] Запит до магазину: GET {url}", flush=True)
     try:
         response = requests.get(url, headers=headers, timeout=25)
     except requests.RequestException as error:
-        print(f"[DEBUG] Помилка мережі до {url}: {type(error).__name__}: {error}", flush=True)
-        message = (
-            f"Не вдалося підключитися до магазину «{shop}». Перевірте назву магазину "
-            "(наприклад, my-store або my-store.myshopify.com) і з'єднання з інтернетом."
-        )
-        raise OrderAPIError(message, 502) from error
+        raise OrderAPIError(f"Не вдалося підключитися до магазину «{shop}».", 502) from error
 
     if response.status_code != 200:
-        print(f"[DEBUG] Shopify відповів {response.status_code} для {url}: {response.text}", flush=True)
         raise shopify_error(response.status_code, shop)
 
     data = response.json()
