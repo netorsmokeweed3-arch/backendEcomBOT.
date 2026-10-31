@@ -1,16 +1,12 @@
 """Універсальний обробник замовлень для будь-якого магазину.
-
-Не містить логіки під конкретний сайт. Сире замовлення з будь-якого API
-приводиться до одного формату через пошук полів за синонімами, у тому числі
-у вкладених об'єктах (customer.first_name, buyer.name, shipping_address.city тощо).
 """
 import re
 from functools import lru_cache
 from typing import Any, Optional
-import requests
+import httpx
 
-# Константи для безпечної перевірки порожніх значень
-EMPTY = {None, "", [], {}, "None", "null", "N/A", "n/a"}
+# Використовуємо звичайний кортеж замість множини, щоб уникнути будь-яких помилок хешування
+EMPTY = (None, "", (), {}, "None", "null", "N/A", "n/a")
 
 # Базові префікси для форматування валют
 CURRENCY_PREFIX = {
@@ -203,8 +199,10 @@ def normalize_shop(raw: Any) -> Optional[str]:
 
 
 @lru_cache(maxsize=128)
-def _cached_split_path(path: str) -> tuple:
-    """Кешування розбиття шляху для прискорення пошуку у вкладених структурах."""
+def _cached_split_path(path: Any) -> tuple:
+    """Кешування розбиття шляху з захистом від не-строкових типів."""
+    if not isinstance(path, str):
+        path = str(path) if path is not None else ""
     return tuple(path.split("."))
 
 
@@ -368,6 +366,8 @@ def normalize_order(raw: dict, shop: str) -> dict:
         or deep_find(raw, ("email",))
     )
 
+    chat_history = raw.get("chat_history") or raw.get("dialog_history") or ""
+
     return {
         "shop": shop,
         "id": to_text(get_path(raw, "id")) or to_text(find(raw, "order_number")),
@@ -392,6 +392,7 @@ def normalize_order(raw: dict, shop: str) -> dict:
             "text": to_text(find(raw, "status")) or "В обробці",
             "cancelled": bool(find(raw, "cancelled")),
         },
+        "chat_history": str(chat_history),
     }
 
 
@@ -407,15 +408,17 @@ def shopify_error(status_code: int, shop: str) -> OrderAPIError:
     return OrderAPIError(f"Помилка API магазину «{shop}»: код {status_code}.", 502)
 
 
-def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
+async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
+    """АСИНХРОННЕ отримання замовлень через httpx."""
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
     
     try:
-        response = requests.get(url, headers=headers, timeout=25)
-    except requests.Timeout as error:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.TimeoutException as error:
         raise OrderAPIError(f"Час очікування запиту до магазину «{shop}» вичерпано.", 504) from error
-    except requests.RequestException as error:
+    except httpx.RequestError as error:
         raise OrderAPIError(f"Не вдалося підключитися до магазину «{shop}».", 502) from error
 
     if response.status_code != 200:
