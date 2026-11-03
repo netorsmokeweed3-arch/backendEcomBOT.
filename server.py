@@ -7,7 +7,8 @@ from flask import Flask, jsonify, request
 from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 
 from ai_service import analyze_order
-from order_normalizer import OrderAPIError, fetch_orders, normalize_order, normalize_shop
+from agents import MultiAgentSystem
+from order_normalizer import OrderAPIError, fetch_orders, fetch_orders_multi, normalize_order, normalize_shop
 
 # Професійне структуроване логування
 logging.basicConfig(
@@ -19,10 +20,13 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.3.3-ai-store-chat"
+BACKEND_VERSION = "2.4.0-ai-store-saas-enterprise"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
+
+# Сховище для статусу перехоплення чату (Human-in-the-loop): { "chat_session_id": "manual" або "ai" }
+CHAT_MODES = {}
 
 
 def read_body() -> dict:
@@ -74,9 +78,10 @@ def handle_unsupported_media(_error):
 
 @app.route("/")
 def home():
-    return f"EcomBot AI Store Backend is running successfully! (v: {BACKEND_VERSION}) 🚀"
+    return f"EcomBot AI Store Multi-Store SaaS Backend is running successfully! (v: {BACKEND_VERSION}) 🚀"
 
 
+# --- СТАНДАРТНИЙ МАРШРУТ ЗАВАНТАЖЕННЯ ЗАМОВЛЕНЬ (1 МАГАЗИН АБО МОК) ---
 @app.route("/api/orders", methods=["POST", "GET"])
 def get_orders():
     try:
@@ -85,7 +90,7 @@ def get_orders():
         
         # --- START MOCK STORE & 100 ORDERS GENERATOR ---
         if "test" in token.lower() or "demo" in token.lower() or "ai" in token.lower() or shop == "ai-store":
-            logger.info("Активовано інтелектуальний тест-каталог (100 замовлень + чати ШІ) для магазину: %s", shop)
+            logger.info("Активовано інтелектуальний тест-каталог (100 замовлень) для магазину: %s", shop)
             
             mock_orders = [
                 {
@@ -171,7 +176,6 @@ def get_orders():
                 })
 
             orders = [normalize_order(raw, shop) for raw in mock_orders if isinstance(raw, dict)]
-            logger.info("Успішно згенеровано та завантажено замовлень: %d для магазину: %s", len(orders), shop)
             return jsonify({"success": True, "shop": shop, "orders": orders})
         # --- END MOCK STORE ---
 
@@ -179,7 +183,7 @@ def get_orders():
         if orders_url is not None and not isinstance(orders_url, str):
             orders_url = str(orders_url)
 
-        raw_orders = fetch_orders(shop, token, orders_url)
+        raw_orders = asyncio.run(fetch_orders(shop, token, orders_url))
         if not isinstance(raw_orders, list):
             raw_orders = []
 
@@ -192,6 +196,26 @@ def get_orders():
         return error_response(error)
 
 
+# --- НОВИЙ МАРШРУТ: МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ (Усі магазини клієнта одночасно) ---
+@app.route("/api/orders/multi", methods=["POST"])
+def get_orders_multi():
+    try:
+        body = read_body()
+        stores = body.get("stores", []) # Масив: [{"shop": "...", "token": "..."}, ...]
+        
+        if not isinstance(stores, list) or not stores:
+            raise OrderAPIError("Потрібно передати масив магазинів (stores).", 400)
+
+        # Паралельно опитуємо всі магазини через наш новий метод у нормалізаторі
+        all_orders = asyncio.run(fetch_orders_multi(stores))
+        
+        logger.info("Успішно зібрано замовлення з %d магазинів паралельно.", len(stores))
+        return jsonify({"success": True, "orders": all_orders})
+
+    except Exception as error:
+        return error_response(error)
+
+
 @app.route("/api/process-ai", methods=["POST"])
 def process_ai():
     try:
@@ -200,59 +224,99 @@ def process_ai():
         order_data = body.get("order_data")
         
         if not isinstance(order_data, dict):
-            raise OrderAPIError("Не передано або пошкоджено дані замовлення (order_data має бути об'єктом).", 400)
+            raise OrderAPIError("Не передано або пошкоджено дані замовлення.", 400)
 
-        if "delivery_address" in order_data and "total_amount" in order_data:
-            order = order_data
-        else:
-            order = normalize_order(order_data, shop)
-            
-        chat_messages = body.get("chat_messages", "")
-        if not isinstance(chat_messages, (str, list)):
-            chat_messages = str(chat_messages)
+        order = order_data if ("delivery_address" in order_data and "total_amount" in order_data) else normalize_order(order_data, shop)
+        chat_messages = str(body.get("chat_messages", ""))
 
         ai_report = asyncio.run(analyze_order(order, chat_messages))
-        logger.info("ШІ-аналіз успішно завершено для замовлення ID: %s", order.get('id', 'unknown'))
-        
         return jsonify({"success": True, "ai_report": ai_report})
         
     except Exception as error:
         return error_response(error)
 
 
-# --- СИНХРОННИЙ МАРШРУТ ДЛЯ ІНТЕРАКТИВНОГО ЧАТУ З ШІ (З ASYNCIO.RUN) ---
+# --- ІНТЕРАКТИВНИЙ ЧАТ З ШІ ТА ПЕРЕХОПЛЕННЯМ (Human-in-the-Loop) ---
 @app.route("/api/chat", methods=["POST"])
 def chat_with_ai():
     try:
         body = read_body()
         shop, _token = read_credentials(body)
         user_message = body.get("message", "")
-        chat_history = body.get("history", "")
+        chat_id = body.get("chat_id", "default_chat")
         
         if not user_message:
             raise OrderAPIError("Повідомлення не може бути порожнім.", 400)
 
-        catalog_context = (
-            "Каталог магазину одягу:\n"
-            "1. Футболка бавовняна (Чорна) - НЕМАЄ В НАЯВНОСТІ.\n"
-            "2. Футболка бавовняна (Зелена - Акція) - В наявності, акційна ціна 350 грн (замість 500 грн).\n"
-            "3. Футболка бавовняна (Синя) - В наявності, ціна 500 грн.\n"
-            "4. Футболка бавовняна (Біла) - В наявності, ціна 500 грн (при замовленні від 2 штук — безкоштовна доставка).\n"
-            "Твоя задача — бути ввічливим продавцем-консультантом, пропонувати альтернативи, якщо товару немає, та допомагати покупцю."
-        )
+        # Перевірка режиму перехоплення (якщо власник увімкнув manual, ШІ не відповідає)
+        current_mode = CHAT_MODES.get(chat_id, "ai")
+        if current_mode == "manual":
+            return jsonify({
+                "success": True, 
+                "reply": "", 
+                "mode": "manual", 
+                "info": "Чак переведено в ручний режим. ШІ не відповідає."
+            })
 
-        full_prompt = f"{catalog_context}\n\nІсторія діалогу:\n{chat_history}\n\nПокупець: {user_message}\nШІ-консультант:"
-        
         dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
-        
-        # Безпечний синхронний виклик асинхронної функції через asyncio.run
-        ai_report = asyncio.run(analyze_order(dummy_order, full_prompt))
-        
-        ai_reply = ai_report.get("ai_summary") or ai_report.get("recommendation") or ai_report.get("summary") or "Вітаю! Чим можу допомогти з вибором футболок?"
+        ai_report = asyncio.run(analyze_order(dummy_order, user_message))
+        ai_reply = ai_report.get("recommendation") or ai_report.get("ai_summary") or "Вітаю! Чим можу допомогти?"
 
-        logger.info("Успішно згенеровано відповідь ШІ у чаті для магазину: %s", shop)
-        return jsonify({"success": True, "reply": ai_reply})
+        return jsonify({"success": True, "reply": ai_reply, "mode": "ai"})
         
+    except Exception as error:
+        return error_response(error)
+
+
+# --- ЕНДПОЇНТ ПЕРЕМИКАННЯ РЕЖИМУ ЧАТУ (AI / MANUAL) ---
+@app.route("/api/chat/mode", methods=["POST"])
+def set_chat_mode():
+    try:
+        body = read_body()
+        chat_id = body.get("chat_id")
+        mode = body.get("mode") # "ai" або "manual"
+
+        if not chat_id or mode not in ["ai", "manual"]:
+            raise OrderAPIError("Некоректні параметри chat_id або mode.", 400)
+
+        CHAT_MODES[chat_id] = mode
+        logger.info("Режим чату для %s змінено на: %s", chat_id, mode)
+        return jsonify({"success": True, "chat_id": chat_id, "mode": mode})
+
+    except Exception as error:
+        return error_response(error)
+
+
+# --- МАРШРУТ ДЛЯ РОЗДІЛУ «ПІДТРИМКА ТА ПОВЕРНЕННЯ» (АГЕНТ 3) ---
+@app.route("/api/support", methods=["POST"])
+def support_and_returns():
+    try:
+        body = read_body()
+        shop, _token = read_credentials(body)
+        complaint_text = body.get("complaint", "") or body.get("message", "")
+        order_info = body.get("order_info", {})
+
+        if not complaint_text:
+            raise OrderAPIError("Текст скарги або запиту на повернення не може бути порожнім.", 400)
+
+        support_analysis = asyncio.run(MultiAgentSystem.run_support_agent(complaint_text, order_info))
+        return jsonify({"success": True, "support_report": support_analysis})
+
+    except Exception as error:
+        return error_response(error)
+
+
+# --- РЕЄСТРАЦІЯ PUSH-ТОКЕНА ДІЛОВОГО ДОДАТКУ ---
+@app.route("/api/notifications/register", methods=["POST"])
+def register_push_token():
+    try:
+        body = read_body()
+        push_token = body.get("push_token")
+        if not push_token:
+            raise OrderAPIError("Push token відсутній.", 400)
+        
+        logger.info("Зареєстровано новий Push-токен для сповіщень: %s", push_token)
+        return jsonify({"success": True, "message": "Push-токен успішно збережено."})
     except Exception as error:
         return error_response(error)
 

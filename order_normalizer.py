@@ -1,9 +1,14 @@
 """Універсальний обробник замовлень для будь-якого магазину.
+Підтримує мульти-магазинний паралельний збір даних (Shopify, Prom, Rozetka тощо).
 """
 import re
+import asyncio
+import logging
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Використовуємо звичайний кортеж замість множини, щоб уникнути будь-яких помилок хешування
 EMPTY = (None, "", (), {}, "None", "null", "N/A", "n/a")
@@ -409,7 +414,7 @@ def shopify_error(status_code: int, shop: str) -> OrderAPIError:
 
 
 async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
-    """АСИНХРОННЕ отримання замовлень через httpx."""
+    """АСИНХРОННЕ отримання замовлень через httpx для одного магазину."""
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
     
@@ -432,3 +437,38 @@ async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) 
     if isinstance(data, list):
         return data
     return data.get("orders") or data.get("data") or data.get("items") or []
+
+
+async def fetch_orders_multi(stores: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """ПАРАЛЕЛЬНИЙ збір замовлень з УСІХ підключених магазинів користувача (Multi-store fetch).
+    stores — список об'єктів у форматі: [{"shop": "store1.com", "token": "tok1"}, {"shop": "store2.com", "token": "tok2"}]
+    """
+    if not isinstance(stores, list) or not stores:
+        return []
+
+    async def fetch_single_store(store_info: Dict[str, str]) -> List[Dict[str, Any]]:
+        shop_raw = store_info.get("shop") or store_info.get("shop_domain")
+        token = store_info.get("token") or store_info.get("access_token")
+        
+        shop = normalize_shop(shop_raw)
+        if not shop or not token:
+            logger.warning("[WARNING] Пропущено магазин через невалідні дані: %s", store_info)
+            return []
+
+        try:
+            raw_orders = await fetch_orders(shop, token)
+            # Нормалізуємо кожне замовлення з прив'язкою до цього магазину
+            return [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
+        except Exception as e:
+            logger.error("[ERROR] Не вдалося завантажити замовлення для магазину %s: %s", shop, e)
+            return []
+
+    # Запускаємо запити до всіх магазинів паралельно через asyncio.gather
+    results = await asyncio.gather(*(fetch_single_store(store) for store in stores))
+    
+    # Зводимо всі списки замовлень в єдиний спільний масив
+    all_orders = []
+    for store_orders in results:
+        all_orders.extend(store_orders)
+        
+    return all_orders
