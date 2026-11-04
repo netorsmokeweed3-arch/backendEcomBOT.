@@ -2,6 +2,7 @@ import json
 import logging
 import random
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from werkzeug.exceptions import BadRequest, UnsupportedMediaType
@@ -9,6 +10,13 @@ from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 from ai_service import analyze_order
 from agents import MultiAgentSystem
 from order_normalizer import OrderAPIError, fetch_orders, fetch_orders_multi, normalize_order, normalize_shop
+
+# Імпортуємо поштові модулі для Нової Пошти та Укрпошти
+from nova_poshta import get_nova_poshta_tracking
+from ukrposhta import get_ukrposhta_tracking
+
+# Імпортуємо фоновий воркер та сховище токенів
+from background_worker import REGISTERED_PUSH_TOKENS, background_store_monitor
 
 # Професійне структуроване логування
 logging.basicConfig(
@@ -20,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.4.0-ai-store-saas-enterprise"
+BACKEND_VERSION = "2.5.0-ai-store-saas-enterprise-push"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
@@ -196,7 +204,7 @@ def get_orders():
         return error_response(error)
 
 
-# --- НОВИЙ МАРШРУТ: МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ (Усі магазини клієнта одночасно) ---
+# --- МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ (Усі магазини клієнта одночасно) ---
 @app.route("/api/orders/multi", methods=["POST"])
 def get_orders_multi():
     try:
@@ -212,6 +220,29 @@ def get_orders_multi():
         logger.info("Успішно зібрано замовлення з %d магазинів паралельно.", len(stores))
         return jsonify({"success": True, "orders": all_orders})
 
+    except Exception as error:
+        return error_response(error)
+
+
+# --- ЕНДПОЇНТ ДЛЯ АВТОМАТИЧНОГО ПОШТОВОГО ТРЕКІНГУ (Нова Пошта / Укрпошта) ---
+@app.route("/api/tracking", methods=["POST"])
+def track_order_parcel():
+    try:
+        body = read_body()
+        ttn = body.get("trackingNumber", "").strip()
+        carrier = body.get("carrier", "Нова Пошта").strip()
+        
+        if not ttn:
+            raise OrderAPIError("Не вказано номер ТТН або штрих-код відправлення.", 400)
+            
+        # Розгалуження в залежності від кур'єрської служби
+        if "укр" in carrier.lower():
+            result = get_ukrposhta_tracking(ttn)
+        else:
+            result = get_nova_poshta_tracking(ttn)
+            
+        return jsonify(result)
+        
     except Exception as error:
         return error_response(error)
 
@@ -255,7 +286,7 @@ def chat_with_ai():
                 "success": True, 
                 "reply": "", 
                 "mode": "manual", 
-                "info": "Чак переведено в ручний режим. ШІ не відповідає."
+                "info": "Чат переведено в ручний режим. ШІ не відповідає."
             })
 
         dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
@@ -315,11 +346,22 @@ def register_push_token():
         if not push_token:
             raise OrderAPIError("Push token відсутній.", 400)
         
-        logger.info("Зареєстровано новий Push-токен для сповіщень: %s", push_token)
+        REGISTERED_PUSH_TOKENS.add(push_token)
+        logger.info("Успішно зареєстровано новий Push-токен для сповіщень: %s", push_token)
         return jsonify({"success": True, "message": "Push-токен успішно збережено."})
     except Exception as error:
         return error_response(error)
 
 
+def start_background_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(background_store_monitor())
+
+
 if __name__ == "__main__":
+    # Запускаємо фоновий монітор магазинів у фоновому потоці
+    worker_thread = threading.Thread(target=start_background_loop, daemon=True)
+    worker_thread.start()
+    
     app.run(host="0.0.0.0", port=5000)
