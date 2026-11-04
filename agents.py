@@ -203,4 +203,6 @@ class MultiAgentSystem:
             return {
                 "risk_level": "HIGH",
                 "ai_suggested_solution": "Стався збій аналізу ризиків. Потрібна перевірка адміністратором."
-            }
+            } 
+
+        
