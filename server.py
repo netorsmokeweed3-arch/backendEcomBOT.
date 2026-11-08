@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.5.2-ai-store-saas-woocommerce-fix"
+BACKEND_VERSION = "2.5.3-ai-store-saas-woocommerce-autofix"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
@@ -52,9 +52,14 @@ def read_body() -> dict:
 
 def read_credentials(body: dict):
     raw_shop = body.get("shop") or body.get("shop_domain")
-    platform = str(body.get("platform", "shopify")).lower()
-    
     shop = normalize_shop(raw_shop.strip() if isinstance(raw_shop, str) else raw_shop)
+    
+    # ПЕРЕВІРКА НА ЛОКАЛЬНИЙ WOOCOMMERCE МАГАЗИН (АВТОМАТИЧНИЙ ПІДМІН КЛЮЧІВ ДЛЯ ТЕСТУ)
+    if shop and "localsite" in str(shop).lower():
+        logger.info("Автоматично застосовано бойові ключі WooCommerce для магазину: %s", shop)
+        return shop, "ck_facec97ea1c6bc83405f538e84cd747c793936c8", "cs_ecfdc5ec07a43783768956973d4ef96952516d6b", "woocommerce"
+
+    platform = str(body.get("platform", "shopify")).lower()
 
     if platform == "woocommerce":
         consumer_key = body.get("consumer_key") or body.get("token")
@@ -101,7 +106,12 @@ def home():
 def get_orders():
     try:
         body = read_body()
+        raw_shop = str(body.get("shop") or body.get("shop_domain", "")).lower()
+        
+        # Примусово визначаємо platform як woocommerce, якщо це наш локальний сайт
         platform = str(body.get("platform", "shopify")).lower()
+        if "localsite" in raw_shop:
+            platform = "woocommerce"
 
         # Якщо це WooCommerce — беремо ключі та тягнемо дані через fetch_woocommerce_orders
         if platform == "woocommerce":
