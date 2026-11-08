@@ -45,7 +45,7 @@ FIELD_SYNONYMS = {
         "date_added_to_db", "time", "order_timestamp", "orderTimestamp", "date_placed",
         "creation_date", "creationDate", "placed_at", "placedAt", "order_date_added",
         "date_created_gmt", "dateCreatedGmt", "purchase_date", "purchaseDate",
-        "order_datetime", "orderDatetime", "time_created", "timeCreated", "data_stворення",
+        "order_datetime", "orderDatetime", "time_created", "timeCreated", "data_створення",
         "data_zamovlennya", "дата_создания", "дата_заказа", "data_sozdaniya", "data_zakaza",
         "order_created_at", "created_date", "createdDate", "data_utvorenya", "data_oformlennya",
         "order.created_at", "order.date", "attributes.created_at", "data.created_at",
@@ -68,7 +68,7 @@ FIELD_SYNONYMS = {
         "customer.customer_name", "buyer.customer_name", "client_details.name", "order_customer_name",
         "customer_info.name", "buyer_info.name", "client_info.name", "customer_profile.name",
         "customer_data.full_name", "buyer_data.full_name", "recipient_full_name", "shipping_fullname",
-        "billing.first_name", "shipping.first_name" # додано для WooCommerce
+        "billing.first_name", "shipping.first_name"
     ],
     "first_name": [
         "customer.first_name", "customer.firstName", "buyer.first_name", "client.first_name",
@@ -109,7 +109,7 @@ FIELD_SYNONYMS = {
         "telefon_kontaktowy", "telefonnummer", "numro_de_telephone", "phone_num", "cell_phone",
         "customer.phone_no", "buyer.phone_no", "shipping_address.telephone_number",
         "order_customer.phone", "client_data.phone", "customer_profile.phone", "contact.phone",
-        "billing.phone", "shipping.phone" # WooCommerce
+        "billing.phone", "shipping.phone"
     ],
     "email": [
         "email", "customer.email", "buyer.email", "client.email", "shipping_address.email", 
@@ -121,7 +121,7 @@ FIELD_SYNONYMS = {
         "elektronka", "el_pochta", "poshta", "mail_address", "mailAddress", "email_address",
         "emailAddress", "contact_mail", "customer_e_mail", "adresa_e_mail", "email_addr",
         "customer.email_address", "buyer.email_address", "client_data.email", "order_email",
-        "billing.email" # WooCommerce
+        "billing.email"
     ],
     "street": [
         "shipping_address.address1", "shippingAddress.address1", "delivery_address.street",
@@ -136,7 +136,7 @@ FIELD_SYNONYMS = {
         "vulicyia", "ulica", "adress", "street_line1", "streetLine1", "location_address",
         "ul", "str", "strasse", "rue", "adres_ulica", "street1_line",
         "shipping_address.street_line1", "delivery_address.address_line1", "shipping.address1",
-        "shipping.address_1", "billing.address_1" # WooCommerce
+        "shipping.address_1", "billing.address_1"
     ],
     "street2": [
         "shipping_address.address2", "shippingAddress.address2", "delivery_address.address2",
@@ -198,7 +198,7 @@ FIELD_SYNONYMS = {
         "delivery_type", "deliveryType", "shipping_type_title", "shipping_provider", "shippingProvider",
         "sposob_dostavki", "metod_dos", "dostavka", "shipping_title_str", "courier", "logistic_service",
         "sposob_oplaty_i_dostavki", "shipping_option", "nova_poshta", "ukrposhta", "shipping.title",
-        "shipping_lines.0.method_title" # WooCommerce
+        "shipping_lines.0.method_title"
     ],
     "currency": [
         "currency", "presentment_currency", "currency_code", "order_currency", "currencyCode",
@@ -206,7 +206,7 @@ FIELD_SYNONYMS = {
         "shop_money.currency_code", "valyuta", "val", "iso_currency_code", "order_currency_code",
         "currency_symbol", "currencySymbol", "valuta", "v_valyuti", "money_currency",
         "shop_currency", "base_currency", "transaction_currency",
-        "curr_code", "waluta", "wahrung", "devise", "order.currency", "currency" # WooCommerce вже містить це поле у корені
+        "curr_code", "waluta", "wahrung", "devise", "order.currency", "currency"
     ],
     "total_amount": [
         "total_price", "current_total_price", "total_amount", "totalAmount", "total",
@@ -225,7 +225,7 @@ FIELD_SYNONYMS = {
         "product_list", "order_products", "elements", "positions", "zakaz_tovary",
         "zmist", "detali_zamovlennya", "order_contents", "cart_contents", "products_array",
         "produkty", "pozycje", "articles", "order_details", "order.line_items", "data.items",
-        "line_items" # WooCommerce
+        "line_items"
     ],
     "item_title": [
         "title", "name", "product_name", "productName", "item_name", "label", "product_title",
@@ -554,7 +554,6 @@ async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) 
 async def fetch_woocommerce_orders(shop_url: str, consumer_key: str, consumer_secret: str) -> list:
     """АСИНХРОННЕ отримання замовлень з WooCommerce через Basic Auth (Live Link або продакшн)."""
     clean_url = shop_url.rstrip("/")
-    # Якщо передано з https://, залишаємо, якщо ні — додаємо https://
     if not clean_url.startswith("http"):
         clean_url = f"https://{clean_url}"
         
@@ -592,41 +591,34 @@ async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any
         shop_raw = store_info.get("shop") or store_info.get("shop_domain")
         
         if platform == "woocommerce":
-            consumer_key = store_info.get("consumer_key") or store_info.get("token")
-            consumer_secret = store_info.get("consumer_secret")
-            
-            if not shop_raw or not consumer_key or not consumer_secret:
-                logger.warning("[WARNING] Пропущено WooCommerce магазин через неповні дані: %s", store_info)
+            shop = normalize_shop(shop_raw) or shop_raw
+            ck = store_info.get("consumer_key") or store_info.get("token")
+            cs = store_info.get("consumer_secret")
+            if not shop or not ck or not cs:
                 return []
-                
             try:
-                raw_orders = await fetch_woocommerce_orders(shop_raw, consumer_key, consumer_secret)
-                return [normalize_order(raw, shop_raw) for raw in raw_orders if isinstance(raw, dict)]
+                raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
+                return [normalize_order(o, shop) for o in raw_orders if isinstance(o, dict)]
             except Exception as e:
-                logger.error("[ERROR] Не вдалося завантажити замовлення для WooCommerce %s: %s", shop_raw, e)
+                logger.error("Помилка збору WooCommerce для %s: %s", shop, e)
                 return []
         else:
-            # За замовчуванням — Shopify
-            token = store_info.get("token") or store_info.get("access_token")
             shop = normalize_shop(shop_raw)
-            
+            token = store_info.get("token") or store_info.get("access_token")
             if not shop or not token:
-                logger.warning("[WARNING] Пропущено Shopify магазин через невалідні дані: %s", store_info)
                 return []
-
             try:
                 raw_orders = await fetch_orders(shop, token)
-                return [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
+                return [normalize_order(o, shop) for o in raw_orders if isinstance(o, dict)]
             except Exception as e:
-                logger.error("[ERROR] Не вдалося завантажити замовлення для Shopify магазину %s: %s", shop, e)
+                logger.error("Помилка збору Shopify для %s: %s", shop, e)
                 return []
 
-    # Запускаємо запити до всіх магазинів паралельно через asyncio.gather
-    results = await asyncio.gather(*(fetch_single_store(store) for store in stores))
+    tasks = [fetch_single_store(store) for store in stores]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Зводимо всі списки замовлень в єдиний спільний масив
     all_orders = []
-    for store_orders in results:
-        all_orders.extend(store_orders)
-        
+    for res in results:
+        if isinstance(res, list):
+            all_orders.extend(res)
     return all_orders
