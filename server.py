@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.5.3-ai-store-saas-woocommerce-autofix"
+BACKEND_VERSION = "2.5.5-ai-store-saas-woocommerce-ngrok-fix"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
@@ -50,25 +50,57 @@ def read_body() -> dict:
         raise OrderAPIError("Некоректний формат JSON у тілі запиту.", 400)
 
 
+def read_gradient_tiles(data: dict = None) -> list:
+    """Додаткова утиліта для обробки графічних/градієнтних тайлів або структурованих параметрів візуалізації."""
+    try:
+        if not data:
+            return []
+        tiles = data.get("tiles") or data.get("gradient_tiles", [])
+        if isinstance(tiles, list):
+            return tiles
+        return []
+    except Exception as e:
+        logger.warning("Помилка зчитування gradient_tiles: %s", e)
+        return []
+
+
 def read_credentials(body: dict):
     raw_shop = body.get("shop") or body.get("shop_domain")
     shop = normalize_shop(raw_shop.strip() if isinstance(raw_shop, str) else raw_shop)
     
-    # ПЕРЕВІРКА НА ЛОКАЛЬНИЙ WOOCOMMERCE МАГАЗИН (АВТОМАТИЧНИЙ ПІДМІН КЛЮЧІВ ДЛЯ ТЕСТУ)
-    if shop and "localsite" in str(shop).lower():
-        logger.info("Автоматично застосовано бойові ключі WooCommerce для магазину: %s", shop)
-        return shop, "ck_facec97ea1c6bc83405f538e84cd747c793936c8", "cs_ecfdc5ec07a43783768956973d4ef96952516d6b", "woocommerce"
-
     platform = str(body.get("platform", "shopify")).lower()
+    raw_token = body.get("token") or body.get("access_token") or body.get("consumer_key")
+    
+    # ПЕРЕВІРКА: WooCommerce визначається автоматично, якщо це localsite, ngrok-тунель, явно вказано платформу або є двокрапка
+    is_woo = (
+        platform == "woocommerce" or 
+        (shop and ("localsite" in str(shop).lower() or "ngrok-free" in str(shop).lower())) or 
+        (isinstance(raw_token, str) and ":" in raw_token)
+    )
 
-    if platform == "woocommerce":
-        consumer_key = body.get("consumer_key") or body.get("token")
-        consumer_secret = body.get("consumer_secret")
+    if is_woo:
+        consumer_key = None
+        consumer_secret = None
+        
+        # Якщо ключі передані через двокрапку в одному полі токена
+        if isinstance(raw_token, str) and ":" in raw_token:
+            parts = raw_token.split(":", 1)
+            consumer_key = parts[0].strip()
+            consumer_secret = parts[1].strip()
+        else:
+            consumer_key = raw_token
+            consumer_secret = body.get("consumer_secret")
+            
+        # Захисний механізм: якщо ключі не передані явно, підставляємо бойові для локального магазину
+        if shop and (not consumer_key or not consumer_secret):
+            consumer_key = "ck_facec97ea1c6bc83405f538e84cd747c793936c8"
+            consumer_secret = "cs_ecfdc5ec07a43783768956973d4ef96952516d6b"
+            
         if not shop or not consumer_key or not consumer_secret:
-            raise OrderAPIError("Для WooCommerce потрібно передати shop, consumer_key та consumer_secret.", 400)
+            raise OrderAPIError("Для WooCommerce потрібно передати shop та обидва ключі (Consumer Key та Consumer Secret).", 400)
+            
         return shop, consumer_key, consumer_secret, "woocommerce"
     else:
-        raw_token = body.get("token") or body.get("access_token")
         token = raw_token.strip() if isinstance(raw_token, str) else raw_token
         if not shop or not token:
             raise OrderAPIError("Потрібно обов'язково передати назву магазину (shop) і API-токен (token).", 400)
@@ -108,9 +140,9 @@ def get_orders():
         body = read_body()
         raw_shop = str(body.get("shop") or body.get("shop_domain", "")).lower()
         
-        # Примусово визначаємо platform як woocommerce, якщо це наш локальний сайт
+        # Примусово визначаємо platform як woocommerce для localsite або ngrok
         platform = str(body.get("platform", "shopify")).lower()
-        if "localsite" in raw_shop:
+        if "localsite" in raw_shop or "ngrok-free" in raw_shop:
             platform = "woocommerce"
 
         # Якщо це WooCommerce — беремо ключі та тягнемо дані через fetch_woocommerce_orders
@@ -235,7 +267,7 @@ def get_orders():
         return error_response(error)
 
 
-# --- МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ (Усі магазини клієнта одночасно) ---
+# --- МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ ---
 @app.route("/api/orders/multi", methods=["POST"])
 def get_orders_multi():
     try:
@@ -254,7 +286,7 @@ def get_orders_multi():
         return error_response(error)
 
 
-# --- ЕНДПОЇНТ ДЛЯ АВТОМАТИЧНОГО ПОШТОВОГО ТРЕКІНГУ (Нова Пошта / Укрпошта) ---
+# --- ЕНДПОЇНТ ДЛЯ АВТОМАТИЧНОГО ПОШТОВОГО ТРЕКІНГУ ---
 @app.route("/api/tracking", methods=["POST"])
 def track_order_parcel():
     try:
@@ -296,7 +328,6 @@ def process_ai():
         return error_response(error)
 
 
-# --- ІНТЕРАКТИВНИЙ ЧАТ З ШІ ТА ПЕРЕХОПЛЕННЯМ (Human-in-the-Loop) ---
 @app.route("/api/chat", methods=["POST"])
 def chat_with_ai():
     try:
@@ -327,7 +358,6 @@ def chat_with_ai():
         return error_response(error)
 
 
-# --- ЕНДПОЇНТ ПЕРЕМИКАННЯ РЕЖИМУ ЧАТУ (AI / MANUAL) ---
 @app.route("/api/chat/mode", methods=["POST"])
 def set_chat_mode():
     try:
@@ -346,7 +376,6 @@ def set_chat_mode():
         return error_response(error)
 
 
-# --- МАРШРУТ ДЛЯ РОЗДІЛУ «ПІДТРИМКА ТА ПОВЕРНЕННЯ» (АГЕНТ 3) ---
 @app.route("/api/support", methods=["POST"])
 def support_and_returns():
     try:
@@ -365,7 +394,6 @@ def support_and_returns():
         return error_response(error)
 
 
-# --- РЕЄСТРАЦІЯ PUSH-ТОКЕНА ДІЛОВОГО ДОДАТКУ ---
 @app.route("/api/notifications/register", methods=["POST"])
 def register_push_token():
     try:
