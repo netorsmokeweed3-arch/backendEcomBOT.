@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.5.1-ai-store-saas-woocommerce-fix"
+BACKEND_VERSION = "2.5.2-ai-store-saas-woocommerce-fix"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
