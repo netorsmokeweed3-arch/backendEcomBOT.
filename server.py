@@ -9,7 +9,7 @@ from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 
 from ai_service import analyze_order
 from agents import MultiAgentSystem
-from order_normalizer import OrderAPIError, fetch_orders, fetch_orders_multi, normalize_order, normalize_shop
+from order_normalizer import OrderAPIError, fetch_orders, fetch_woocommerce_orders, fetch_orders_multi, normalize_order, normalize_shop
 
 # Імпортуємо поштові модулі для Нової Пошти та Укрпошти
 from nova_poshta import get_nova_poshta_tracking
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-BACKEND_VERSION = "2.5.0-ai-store-saas-enterprise-push"
+BACKEND_VERSION = "2.5.1-ai-store-saas-woocommerce-fix"
 
 # Жорсткий ліміт розміру тіла запиту (2 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
@@ -52,15 +52,22 @@ def read_body() -> dict:
 
 def read_credentials(body: dict):
     raw_shop = body.get("shop") or body.get("shop_domain")
-    raw_token = body.get("token") or body.get("access_token")
-
-    shop = normalize_shop(raw_shop.strip() if isinstance(raw_shop, str) else raw_shop)
-    token = raw_token.strip() if isinstance(raw_token, str) else raw_token
-
-    if not shop or not token:
-        raise OrderAPIError("Потрібно обов'язково передати назву магазину (shop) і API-токен (token).", 400)
+    platform = str(body.get("platform", "shopify")).lower()
     
-    return shop, token
+    shop = normalize_shop(raw_shop.strip() if isinstance(raw_shop, str) else raw_shop)
+
+    if platform == "woocommerce":
+        consumer_key = body.get("consumer_key") or body.get("token")
+        consumer_secret = body.get("consumer_secret")
+        if not shop or not consumer_key or not consumer_secret:
+            raise OrderAPIError("Для WooCommerce потрібно передати shop, consumer_key та consumer_secret.", 400)
+        return shop, consumer_key, consumer_secret, "woocommerce"
+    else:
+        raw_token = body.get("token") or body.get("access_token")
+        token = raw_token.strip() if isinstance(raw_token, str) else raw_token
+        if not shop or not token:
+            raise OrderAPIError("Потрібно обов'язково передати назву магазину (shop) і API-токен (token).", 400)
+        return shop, token, None, "shopify"
 
 
 def error_response(error: Exception):
@@ -94,10 +101,24 @@ def home():
 def get_orders():
     try:
         body = read_body()
-        shop, token = read_credentials(body)
+        platform = str(body.get("platform", "shopify")).lower()
+
+        # Якщо це WooCommerce — беремо ключі та тягнемо дані через fetch_woocommerce_orders
+        if platform == "woocommerce":
+            shop, consumer_key, consumer_secret, _ = read_credentials(body)
+            logger.info("Запит замовлень для WooCommerce магазину: %s", shop)
+            raw_orders = asyncio.run(fetch_woocommerce_orders(shop, consumer_key, consumer_secret))
+            if not isinstance(raw_orders, list):
+                raw_orders = []
+            orders = [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
+            logger.info("Успішно завантажено WooCommerce замовлень: %d", len(orders))
+            return jsonify({"success": True, "shop": shop, "orders": orders})
+
+        # Стандартна логіка для Shopify / Mock
+        shop, token, _, _ = read_credentials(body)
         
         # --- START MOCK STORE & 100 ORDERS GENERATOR ---
-        if "test" in token.lower() or "demo" in token.lower() or "ai" in token.lower() or shop == "ai-store":
+        if "test" in str(token).lower() or "demo" in str(token).lower() or "ai" in str(token).lower() or shop == "ai-store":
             logger.info("Активовано інтелектуальний тест-каталог (100 замовлень) для магазину: %s", shop)
             
             mock_orders = [
@@ -209,12 +230,11 @@ def get_orders():
 def get_orders_multi():
     try:
         body = read_body()
-        stores = body.get("stores", []) # Масив: [{"shop": "...", "token": "..."}, ...]
+        stores = body.get("stores", [])
         
         if not isinstance(stores, list) or not stores:
             raise OrderAPIError("Потрібно передати масив магазинів (stores).", 400)
 
-        # Паралельно опитуємо всі магазини через наш новий метод у нормалізаторі
         all_orders = asyncio.run(fetch_orders_multi(stores))
         
         logger.info("Успішно зібрано замовлення з %d магазинів паралельно.", len(stores))
@@ -235,7 +255,6 @@ def track_order_parcel():
         if not ttn:
             raise OrderAPIError("Не вказано номер ТТН або штрих-код відправлення.", 400)
             
-        # Розгалуження в залежності від кур'єрської служби
         if "укр" in carrier.lower():
             result = get_ukrposhta_tracking(ttn)
         else:
@@ -251,7 +270,7 @@ def track_order_parcel():
 def process_ai():
     try:
         body = read_body()
-        shop, _token = read_credentials(body)
+        shop, _, _, _ = read_credentials(body)
         order_data = body.get("order_data")
         
         if not isinstance(order_data, dict):
@@ -272,14 +291,13 @@ def process_ai():
 def chat_with_ai():
     try:
         body = read_body()
-        shop, _token = read_credentials(body)
+        shop, _, _, _ = read_credentials(body)
         user_message = body.get("message", "")
         chat_id = body.get("chat_id", "default_chat")
         
         if not user_message:
             raise OrderAPIError("Повідомлення не може бути порожнім.", 400)
 
-        # Перевірка режиму перехоплення (якщо власник увімкнув manual, ШІ не відповідає)
         current_mode = CHAT_MODES.get(chat_id, "ai")
         if current_mode == "manual":
             return jsonify({
@@ -305,7 +323,7 @@ def set_chat_mode():
     try:
         body = read_body()
         chat_id = body.get("chat_id")
-        mode = body.get("mode") # "ai" або "manual"
+        mode = body.get("mode")
 
         if not chat_id or mode not in ["ai", "manual"]:
             raise OrderAPIError("Некоректні параметри chat_id або mode.", 400)
@@ -323,7 +341,7 @@ def set_chat_mode():
 def support_and_returns():
     try:
         body = read_body()
-        shop, _token = read_credentials(body)
+        shop, _, _, _ = read_credentials(body)
         complaint_text = body.get("complaint", "") or body.get("message", "")
         order_info = body.get("order_info", {})
 
@@ -360,7 +378,6 @@ def start_background_loop():
 
 
 if __name__ == "__main__":
-    # Запускаємо фоновий монітор магазинів у фоновому потоці
     worker_thread = threading.Thread(target=start_background_loop, daemon=True)
     worker_thread.start()
     
