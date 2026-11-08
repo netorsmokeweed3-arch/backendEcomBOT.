@@ -1,5 +1,5 @@
 """Універсальний обробник замовлень для будь-якого магазину.
-Підтримує мульти-магазинний паралельний збір даних (Shopify, Prom, Rozetka тощо).
+Підтримує мульти-магазинний паралельний збір даних (Shopify, WooCommerce, Prom тощо).
 """
 import re
 import asyncio
@@ -45,7 +45,7 @@ FIELD_SYNONYMS = {
         "date_added_to_db", "time", "order_timestamp", "orderTimestamp", "date_placed",
         "creation_date", "creationDate", "placed_at", "placedAt", "order_date_added",
         "date_created_gmt", "dateCreatedGmt", "purchase_date", "purchaseDate",
-        "order_datetime", "orderDatetime", "time_created", "timeCreated", "data_stvoreння",
+        "order_datetime", "orderDatetime", "time_created", "timeCreated", "data_stворення",
         "data_zamovlennya", "дата_создания", "дата_заказа", "data_sozdaniya", "data_zakaza",
         "order_created_at", "created_date", "createdDate", "data_utvorenya", "data_oformlennya",
         "order.created_at", "order.date", "attributes.created_at", "data.created_at",
@@ -67,7 +67,8 @@ FIELD_SYNONYMS = {
         "shipping_address.fullname", "shipping_address.full_name", "billing_address.full_name",
         "customer.customer_name", "buyer.customer_name", "client_details.name", "order_customer_name",
         "customer_info.name", "buyer_info.name", "client_info.name", "customer_profile.name",
-        "customer_data.full_name", "buyer_data.full_name", "recipient_full_name", "shipping_fullname"
+        "customer_data.full_name", "buyer_data.full_name", "recipient_full_name", "shipping_fullname",
+        "billing.first_name", "shipping.first_name" # додано для WooCommerce
     ],
     "first_name": [
         "customer.first_name", "customer.firstName", "buyer.first_name", "client.first_name",
@@ -78,7 +79,8 @@ FIELD_SYNONYMS = {
         "user_firstname", "userFirstname", "name_first", "customer_imya", "imya_pokupcya",
         "shipping_address.given_name", "billing_address.given_name", "client_given_name",
         "imie", "vorname", "prenom", "customer_first_name",
-        "customer_info.first_name", "buyer_info.first_name", "client_info.first_name", "customer.given_name"
+        "customer_info.first_name", "buyer_info.first_name", "client_info.first_name", "customer.given_name",
+        "billing.first_name", "shipping.first_name"
     ],
     "last_name": [
         "customer.last_name", "customer.lastName", "buyer.last_name", "client.last_name",
@@ -89,7 +91,8 @@ FIELD_SYNONYMS = {
         "user_lastname", "userLastname", "name_last", "familiya", "prizvyshche_pokupcya",
         "shipping_address.family_name", "billing_address.family_name", "client_family_name",
         "nazwisko", "nachname", "nom", "customer_last_name",
-        "customer_info.last_name", "buyer_info.last_name", "client_info.last_name", "customer.family_name"
+        "customer_info.last_name", "buyer_info.last_name", "client_info.last_name", "customer.family_name",
+        "billing.last_name", "shipping.last_name"
     ],
     "phone": [
         "shipping_address.phone", "shippingAddress.phone", "delivery_address.phone",
@@ -105,7 +108,8 @@ FIELD_SYNONYMS = {
         "nomer_mob", "mobilny_nomer", "kontakt_telefon", "contact_telephone",
         "telefon_kontaktowy", "telefonnummer", "numro_de_telephone", "phone_num", "cell_phone",
         "customer.phone_no", "buyer.phone_no", "shipping_address.telephone_number",
-        "order_customer.phone", "client_data.phone", "customer_profile.phone", "contact.phone"
+        "order_customer.phone", "client_data.phone", "customer_profile.phone", "contact.phone",
+        "billing.phone", "shipping.phone" # WooCommerce
     ],
     "email": [
         "email", "customer.email", "buyer.email", "client.email", "shipping_address.email", 
@@ -116,7 +120,8 @@ FIELD_SYNONYMS = {
         "customer_mail", "buyer_mail", "client_mail", "e-mail", "electronic_mail",
         "elektronka", "el_pochta", "poshta", "mail_address", "mailAddress", "email_address",
         "emailAddress", "contact_mail", "customer_e_mail", "adresa_e_mail", "email_addr",
-        "customer.email_address", "buyer.email_address", "client_data.email", "order_email"
+        "customer.email_address", "buyer.email_address", "client_data.email", "order_email",
+        "billing.email" # WooCommerce
     ],
     "street": [
         "shipping_address.address1", "shippingAddress.address1", "delivery_address.street",
@@ -130,7 +135,8 @@ FIELD_SYNONYMS = {
         "shipping_street", "billing_street", "delivery_address1", "delivery_street_address",
         "vulicyia", "ulica", "adress", "street_line1", "streetLine1", "location_address",
         "ul", "str", "strasse", "rue", "adres_ulica", "street1_line",
-        "shipping_address.street_line1", "delivery_address.address_line1", "shipping.address1"
+        "shipping_address.street_line1", "delivery_address.address_line1", "shipping.address1",
+        "shipping.address_1", "billing.address_1" # WooCommerce
     ],
     "street2": [
         "shipping_address.address2", "shippingAddress.address2", "delivery_address.address2",
@@ -142,8 +148,7 @@ FIELD_SYNONYMS = {
         "house_number", "houseNumber", "building_no", "flat_no",
         "building_num", "room_number", "roomNumber", "office_number", "officeNumber",
         "podyzd", "podyizd", "etazh", "floor", "dop_address", "additional_address",
-        "shipping_address.suite", "billing_address.suite", "shipping_address.unit", "billing_address.unit",
-        "nr_domu", "nr_mieszkania", "bâtiment", "etage", "shipping_address.address_2"
+        "shipping.address_2", "billing.address_2"
     ],
     "city": [
         "shipping_address.city", "shippingAddress.city", "delivery_address.city",
@@ -152,7 +157,8 @@ FIELD_SYNONYMS = {
         "shipping_address.town", "delivery_address.city_name", "billing_address.town", "city_name",
         "delivery_city", "shipping_city", "billing_city", "naseleniy_punkt", "miejsce",
         "town_city", "townCity", "city_town", "cityTown", "lokalizacja",
-        "ort", "ville", "misto_naselenyy_punkt", "delivery_town", "shipping_address.city_name"
+        "ort", "ville", "misto_naselenyy_punkt", "delivery_town", "shipping_address.city_name",
+        "shipping.city", "billing.city"
     ],
     "region": [
         "shipping_address.province", "shippingAddress.province", "shipping_address.state",
@@ -162,7 +168,8 @@ FIELD_SYNONYMS = {
         "shtat", "reys", "rayon", "shipping_address.region_name", "state_province", "stateProvince",
         "delivery_region", "shipping_region", "billing_region", "oblast_name", "region_name",
         "administrativnyy_rayon", "subdivision", "subDivision",
-        "wojewodztwo", "bundesland", "region_state", "shipping_address.province_code"
+        "wojewodztwo", "bundesland", "region_state", "shipping_address.province_code",
+        "shipping.state", "billing.state"
     ],
     "postal_code": [
         "shipping_address.zip", "shippingAddress.zip", "shipping_address.postal_code",
@@ -171,7 +178,8 @@ FIELD_SYNONYMS = {
         "index", "post_index", "poshtovyi_indeks", "shipping_address.postcode", "billing_address.postal_code",
         "delivery_postal_code", "shipping_postal_code", "billing_postal_code", "indeks",
         "pochtovyy_indeks", "postalCodeNum", "zip_codes", "postal", "postalCodeString",
-        "kod_pocztowy", "plz", "code_postal", "postal_index", "shipping_address.zip_code"
+        "kod_pocztowy", "plz", "code_postal", "postal_index", "shipping_address.zip_code",
+        "shipping.postcode", "billing.postcode"
     ],
     "country": [
         "shipping_address.country", "shippingAddress.country", "shipping_address.country_name",
@@ -179,7 +187,8 @@ FIELD_SYNONYMS = {
         "country_name", "country", "billing_address.country", "billingAddress.country", "country_code", "countryCode",
         "krayina", "strana", "shipping_address.country_code", "billing_address.country_code",
         "delivery_country", "shipping_country", "billing_country", "derzhava", "land", "pais",
-        "kraj", "paays", "country_iso", "shipping_address.country_iso"
+        "kraj", "paays", "country_iso", "shipping_address.country_iso",
+        "shipping.country", "billing.country"
     ],
     "delivery_method": [
         "delivery_method", "shipping_lines.0.title", "delivery_option.name", "delivery.title",
@@ -188,7 +197,8 @@ FIELD_SYNONYMS = {
         "sposib_dostavky", "transport", "shipping_carrier", "shipping_method_title", "shipping_type",
         "delivery_type", "deliveryType", "shipping_type_title", "shipping_provider", "shippingProvider",
         "sposob_dostavki", "metod_dos", "dostavka", "shipping_title_str", "courier", "logistic_service",
-        "sposob_oplaty_i_dostavki", "shipping_option", "nova_poshta", "ukrposhta", "shipping.title"
+        "sposob_oplaty_i_dostavki", "shipping_option", "nova_poshta", "ukrposhta", "shipping.title",
+        "shipping_lines.0.method_title" # WooCommerce
     ],
     "currency": [
         "currency", "presentment_currency", "currency_code", "order_currency", "currencyCode",
@@ -196,7 +206,7 @@ FIELD_SYNONYMS = {
         "shop_money.currency_code", "valyuta", "val", "iso_currency_code", "order_currency_code",
         "currency_symbol", "currencySymbol", "valuta", "v_valyuti", "money_currency",
         "shop_currency", "base_currency", "transaction_currency",
-        "curr_code", "waluta", "wahrung", "devise", "order.currency"
+        "curr_code", "waluta", "wahrung", "devise", "order.currency", "currency" # WooCommerce вже містить це поле у корені
     ],
     "total_amount": [
         "total_price", "current_total_price", "total_amount", "totalAmount", "total",
@@ -214,7 +224,8 @@ FIELD_SYNONYMS = {
         "tovary", "poziciyi", "cart_items", "contents", "order_lines", "purchased_items",
         "product_list", "order_products", "elements", "positions", "zakaz_tovary",
         "zmist", "detali_zamovlennya", "order_contents", "cart_contents", "products_array",
-        "produkty", "pozycje", "articles", "order_details", "order.line_items", "data.items"
+        "produkty", "pozycje", "articles", "order_details", "order.line_items", "data.items",
+        "line_items" # WooCommerce
     ],
     "item_title": [
         "title", "name", "product_name", "productName", "item_name", "label", "product_title",
@@ -421,11 +432,13 @@ def normalize_order(raw: dict, shop: str) -> dict:
         to_text(find(raw, "first_name")) 
         or to_text(get_path(raw, "customer.first_name")) 
         or to_text(get_path(raw, "shipping_address.first_name"))
+        or to_text(get_path(raw, "billing.first_name"))
     )
     last = (
         to_text(find(raw, "last_name")) 
         or to_text(get_path(raw, "customer.last_name")) 
         or to_text(get_path(raw, "shipping_address.last_name"))
+        or to_text(get_path(raw, "billing.last_name"))
     )
     customer_name = (
         " ".join(part for part in (first, last) if part) 
@@ -437,24 +450,27 @@ def normalize_order(raw: dict, shop: str) -> dict:
     street = (
         to_text(get_path(raw, "shipping_address.address1")) 
         or to_text(get_path(raw, "shipping_address.street")) 
+        or to_text(get_path(raw, "billing.address_1"))
         or to_text(find(raw, "street"))
     )
     street2 = (
         to_text(get_path(raw, "shipping_address.address2")) 
+        or to_text(get_path(raw, "billing.address_2"))
         or to_text(find(raw, "street2"))
     )
     full_street = " ".join(part for part in (street, street2) if part) or string_address(raw)
 
-    city = to_text(get_path(raw, "shipping_address.city")) or to_text(find(raw, "city"))
-    region = to_text(get_path(raw, "shipping_address.province")) or to_text(get_path(raw, "shipping_address.state")) or to_text(find(raw, "region"))
-    postal_code = to_text(get_path(raw, "shipping_address.zip")) or to_text(get_path(raw, "shipping_address.postal_code")) or to_text(find(raw, "postal_code"))
-    country = to_text(get_path(raw, "shipping_address.country")) or to_text(find(raw, "country"))
+    city = to_text(get_path(raw, "shipping_address.city")) or to_text(get_path(raw, "billing.city")) or to_text(find(raw, "city"))
+    region = to_text(get_path(raw, "shipping_address.province")) or to_text(get_path(raw, "shipping_address.state")) or to_text(get_path(raw, "billing.state")) or to_text(find(raw, "region"))
+    postal_code = to_text(get_path(raw, "shipping_address.zip")) or to_text(get_path(raw, "shipping_address.postal_code")) or to_text(get_path(raw, "billing.postcode")) or to_text(find(raw, "postal_code"))
+    country = to_text(get_path(raw, "shipping_address.country")) or to_text(get_path(raw, "billing.country")) or to_text(find(raw, "country"))
     
     full_address = ", ".join(part for part in (country, region, city, full_street, postal_code) if part)
 
     phone = (
         to_text(get_path(raw, "shipping_address.phone")) 
         or to_text(get_path(raw, "customer.phone"))
+        or to_text(get_path(raw, "billing.phone"))
         or to_text(find(raw, "phone")) 
         or deep_find(raw, ("phone",))
     )
@@ -462,6 +478,7 @@ def normalize_order(raw: dict, shop: str) -> dict:
     email = (
         to_text(get_path(raw, "customer.email"))
         or to_text(get_path(raw, "shipping_address.email"))
+        or to_text(get_path(raw, "billing.email"))
         or to_text(find(raw, "email")) 
         or deep_find(raw, ("email",))
     )
@@ -509,7 +526,7 @@ def shopify_error(status_code: int, shop: str) -> OrderAPIError:
 
 
 async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
-    """АСИНХРОННЕ отримання замовлень через httpx для одного магазину."""
+    """АСИНХРОННЕ отримання замовлень через httpx для Shopify магазину."""
     url = orders_url or f"https://{shop}/admin/api/2026-10/orders.json?status=any"
     headers = {"X-Shopify-Access-Token": token, "Authorization": f"Bearer {token}", "Accept": "application/json"}
     
@@ -534,29 +551,75 @@ async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) 
     return data.get("orders") or data.get("data") or data.get("items") or []
 
 
-async def fetch_orders_multi(stores: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """ПАРАЛЕЛЬНИЙ збір замовлень з УСІХ підключених магазинів користувача (Multi-store fetch).
-    stores — список об'єктів у форматі: [{"shop": "store1.com", "token": "tok1"}, {"shop": "store2.com", "token": "tok2"}]
+async def fetch_woocommerce_orders(shop_url: str, consumer_key: str, consumer_secret: str) -> list:
+    """АСИНХРОННЕ отримання замовлень з WooCommerce через Basic Auth (Live Link або продакшн)."""
+    clean_url = shop_url.rstrip("/")
+    # Якщо передано з https://, залишаємо, якщо ні — додаємо https://
+    if not clean_url.startswith("http"):
+        clean_url = f"https://{clean_url}"
+        
+    url = f"{clean_url}/wp-json/wc/v3/orders"
+    
+    try:
+        async with httpx.AsyncClient(timeout=25.0, auth=(consumer_key, consumer_secret)) as client:
+            response = await client.get(url)
+    except httpx.TimeoutException as error:
+        raise OrderAPIError(f"Час очікування запиту до WooCommerce магазину «{shop_url}» вичерпано.", 504) from error
+    except httpx.RequestError as error:
+        raise OrderAPIError(f"Не вдалося підключитися до WooCommerce магазину «{shop_url}». Перевір Live Link.", 502) from error
+
+    if response.status_code != 200:
+        raise OrderAPIError(f"Помилка WooCommerce API для «{shop_url}»: код {response.status_code}.", response.status_code)
+
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise OrderAPIError(f"WooCommerce магазин «{shop_url}» повернув невалідний JSON.", 502) from error
+
+    return data if isinstance(data, list) else []
+
+
+async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """ПАРАЛЕЛЬНИЙ збір замовлень з УСІХ підключених магазинів (Shopify та WooCommerce).
+    stores — список об'єктів. Приклад для Shopify: [{"shop": "store.com", "token": "tok"}]
+    Приклад для WooCommerce: [{"shop": "mysite.localsite.io", "consumer_key": "ck_...", "consumer_secret": "cs_...", "platform": "woocommerce"}]
     """
     if not isinstance(stores, list) or not stores:
         return []
 
-    async def fetch_single_store(store_info: Dict[str, str]) -> List[Dict[str, Any]]:
+    async def fetch_single_store(store_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        platform = store_info.get("platform", "shopify").lower()
         shop_raw = store_info.get("shop") or store_info.get("shop_domain")
-        token = store_info.get("token") or store_info.get("access_token")
         
-        shop = normalize_shop(shop_raw)
-        if not shop or not token:
-            logger.warning("[WARNING] Пропущено магазин через невалідні дані: %s", store_info)
-            return []
+        if platform == "woocommerce":
+            consumer_key = store_info.get("consumer_key") or store_info.get("token")
+            consumer_secret = store_info.get("consumer_secret")
+            
+            if not shop_raw or not consumer_key or not consumer_secret:
+                logger.warning("[WARNING] Пропущено WooCommerce магазин через неповні дані: %s", store_info)
+                return []
+                
+            try:
+                raw_orders = await fetch_woocommerce_orders(shop_raw, consumer_key, consumer_secret)
+                return [normalize_order(raw, shop_raw) for raw in raw_orders if isinstance(raw, dict)]
+            except Exception as e:
+                logger.error("[ERROR] Не вдалося завантажити замовлення для WooCommerce %s: %s", shop_raw, e)
+                return []
+        else:
+            # За замовчуванням — Shopify
+            token = store_info.get("token") or store_info.get("access_token")
+            shop = normalize_shop(shop_raw)
+            
+            if not shop or not token:
+                logger.warning("[WARNING] Пропущено Shopify магазин через невалідні дані: %s", store_info)
+                return []
 
-        try:
-            raw_orders = await fetch_orders(shop, token)
-            # Нормалізуємо кожне замовлення з прив'язкою до цього магазину
-            return [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
-        except Exception as e:
-            logger.error("[ERROR] Не вдалося завантажити замовлення для магазину %s: %s", shop, e)
-            return []
+            try:
+                raw_orders = await fetch_orders(shop, token)
+                return [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
+            except Exception as e:
+                logger.error("[ERROR] Не вдалося завантажити замовлення для Shopify магазину %s: %s", shop, e)
+                return []
 
     # Запускаємо запити до всіх магазинів паралельно через asyncio.gather
     results = await asyncio.gather(*(fetch_single_store(store) for store in stores))
