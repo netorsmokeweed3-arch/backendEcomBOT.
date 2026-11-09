@@ -70,8 +70,9 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
     rates_info = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as httpx_client:
-            # ВИПРАВЛЕНО: Чистий URL без маркерних дужок
-            response = await httpx_client.get("[https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json](https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json)")
+            # ЧИСТИЙ URL БЕЗ ЖОДНИХ МАРКДАУН-ДУЖОК:
+            response = await httpx_client.get("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json")
+            
             if response.status_code == 200:
                 data = response.json()
                 for item in data:
@@ -88,7 +89,6 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
     except Exception as e:
         logger.warning("[WARNING] Не вдалося завантажити курси валют НБУ: %s", e)
     return rates_info
-
 
 def _sanitize_input(text: Any) -> str:
     if not isinstance(text, str):
