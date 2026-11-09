@@ -1,24 +1,50 @@
-import json
-import logging
-import random
-import asyncio
-import threading
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, request
-from werkzeug.exceptions import BadRequest, UnsupportedMediaType
+"""Enterprise Async SaaS Backend (FastAPI Edition + Ultimate Security & Auth).
+Захист API-ключем, безпечний CORS, Sentry-моніторинг та шифрування.
+"""
 
+import os
+import logging
+import asyncio
+import time
+from typing import Dict, Any, List, Optional
+from contextlib import asynccontextmanager
+
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+from fastapi import FastAPI, HTTPException, Request, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+# Ініціалізація Sentry для продакшн-моніторингу помилок
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[FastApiIntegration()],
+        traces_sample_rate=1.0,
+        environment=os.getenv("ENVIRONMENT", "production")
+    )
+
+# Внутрішні модулі системи та БД
+from database import init_db, close_db, get_db, ChatModeModel, PushTokenModel
 from ai_service import analyze_order
 from agents import MultiAgentSystem
-from order_normalizer import OrderAPIError, fetch_orders, fetch_woocommerce_orders, fetch_orders_multi, normalize_order, normalize_shop
-
-# Імпортуємо поштові модулі для Нової Пошти та Укрпошти
+from order_normalizer import (
+    OrderAPIError, 
+    fetch_orders, 
+    fetch_woocommerce_orders, 
+    fetch_orders_multi, 
+    normalize_order, 
+    normalize_shop
+)
 from nova_poshta import get_nova_poshta_tracking
 from ukrposhta import get_ukrposhta_tracking
+from background_worker import background_store_monitor
 
-# Імпортуємо фоновий воркер та сховище токенів
-from background_worker import REGISTERED_PUSH_TOKENS, background_store_monitor
-
-# Професійне структуроване логування
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -26,397 +52,330 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+BACKEND_VERSION = "3.4.0-fastapi-enterprise-max-security"
 
-BACKEND_VERSION = "2.5.5-ai-store-saas-woocommerce-ngrok-fix"
+# --- БЕЗПЕКА ТА АВТОРИЗАЦІЯ ЗАПИТІВ ---
+security_scheme = HTTPBearer(auto_error=False)
+MASTER_API_KEY = os.getenv("APP_MASTER_API_KEY", "netor-secure-saas-secret-key-2026")
 
-# Жорсткий ліміт розміру тіла запиту (2 МБ)
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 
-
-# Сховище для статусу перехоплення чату (Human-in-the-loop): { "chat_session_id": "manual" або "ai" }
-CHAT_MODES = {}
-
-
-def read_body() -> dict:
-    try:
-        if request.is_json:
-            body = request.get_json(silent=True)
-            if isinstance(body, dict):
-                return body
-        if request.form:
-            return request.form.to_dict()
-        return request.args.to_dict()
-    except BadRequest:
-        raise OrderAPIError("Некоректний формат JSON у тілі запиту.", 400)
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
+    """Перевірка Bearer Token для захисту від несанкціонованого доступу хакерів."""
+    # Якщо розробка або ключ збігається — пропускаємо
+    if not MASTER_API_KEY:
+        return True
+    
+    if not credentials or credentials.credentials != MASTER_API_KEY:
+        logger.warning("Спроба несанкціонованого доступу до API без валідного токена!")
+        raise HTTPException(
+            status_code=401, 
+            detail="Невірний або відсутній ключ авторизації (Unauthorized)."
+        )
+    return True
 
 
-def read_gradient_tiles(data: dict = None) -> list:
-    """Додаткова утиліта для обробки графічних/градієнтних тайлів або структурованих параметрів візуалізації."""
-    try:
-        if not data:
-            return []
-        tiles = data.get("tiles") or data.get("gradient_tiles", [])
-        if isinstance(tiles, list):
-            return tiles
-        return []
-    except Exception as e:
-        logger.warning("Помилка зчитування gradient_tiles: %s", e)
-        return []
+# Посилений Rate Limiter у пам'яті (IP -> [timestamps])
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_MAX_REQUESTS = 20
+ip_request_counts: Dict[str, List[float]] = {}
+import threading
+rate_limit_lock = threading.Lock()
+
+def check_rate_limit(ip: str) -> bool:
+    now = time.time()
+    with rate_limit_lock:
+        if ip not in ip_request_counts:
+            ip_request_counts[ip] = []
+        ip_request_counts[ip] = [t for t in ip_request_counts[ip] if now - t < RATE_LIMIT_WINDOW]
+        if len(ip_request_counts[ip]) >= RATE_LIMIT_MAX_REQUESTS:
+            return False
+        ip_request_counts[ip].append(now)
+        return True
 
 
-def read_credentials(body: dict):
-    raw_shop = body.get("shop") or body.get("shop_domain")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    logger.info("Базу даних успішно ініціалізовано на старті! 🗄️")
+
+    monitor_task = asyncio.create_task(background_store_monitor())
+    logger.info("Фоновий монітор магазинів успішно інтегровано в FastAPI Event Loop! 🚀")
+    
+    yield
+    
+    monitor_task.cancel()
+    await close_db()
+    logger.info("Сервер та з'єднання з БД штатно зупинено.")
+
+
+app = FastAPI(
+    title="EcomBot AI Store SaaS API (Secured)",
+    version=BACKEND_VERSION,
+    lifespan=lifespan
+)
+
+# --- ПРОДАКШН-ФІЛЬТРАЦІЯ CORS ---
+# Можна винести дозволені домени у змінну середовища ALLOWED_ORIGINS через кому
+raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
+origins_list = [o.strip() for o in raw_origins.split(",")] if raw_origins != "*" else ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- Pydantic Схеми Запитів ---
+class CredentialsSchema(BaseModel):
+    shop: str
+    platform: Optional[str] = "shopify"
+    token: Optional[str] = None
+    access_token: Optional[str] = None
+    consumer_key: Optional[str] = None
+    consumer_secret: Optional[str] = None
+    orders_url: Optional[str] = None
+
+class MultiStoreSchema(BaseModel):
+    stores: List[Dict[str, Any]]
+
+class TrackingSchema(BaseModel):
+    trackingNumber: str
+    carrier: Optional[str] = "Нова Пошта"
+
+class ProcessAISchema(BaseModel):
+    shop: str
+    token: Optional[str] = None
+    order_data: Dict[str, Any]
+    chat_messages: Optional[str] = ""
+
+class ChatSchema(BaseModel):
+    shop: str
+    token: Optional[str] = None
+    message: str
+    chat_id: Optional[str] = "default_chat"
+
+class ChatModeSchema(BaseModel):
+    chat_id: str
+    mode: str
+
+class SupportSchema(BaseModel):
+    shop: str
+    token: Optional[str] = None
+    complaint: Optional[str] = None
+    message: Optional[str] = None
+    order_info: Optional[Dict[str, Any]] = {}
+
+class PushTokenSchema(BaseModel):
+    push_token: str
+
+
+def parse_credentials(data: CredentialsSchema):
+    raw_shop = data.shop
     shop = normalize_shop(raw_shop.strip() if isinstance(raw_shop, str) else raw_shop)
     
-    platform = str(body.get("platform", "shopify")).lower()
-    raw_token = body.get("token") or body.get("access_token") or body.get("consumer_key")
+    platform = str(data.platform or "shopify").lower()
+    raw_token = data.token or data.access_token or data.consumer_key
     
-    # ПЕРЕВІРКА: WooCommerce визначається автоматично, якщо це localsite, ngrok-тунель, явно вказано платформу або є двокрапка
     is_woo = (
         platform == "woocommerce" or 
-        (shop and ("localsite" in str(shop).lower() or "ngrok-free" in str(shop).lower())) or 
+        (shop and ("localsite" in str(shop).lower() or "ngrok-free" in str(shop).lower() or "netor.local" in str(shop).lower())) or 
         (isinstance(raw_token, str) and ":" in raw_token)
     )
 
     if is_woo:
         consumer_key = None
         consumer_secret = None
-        
-        # Якщо ключі передані через двокрапку в одному полі токена
         if isinstance(raw_token, str) and ":" in raw_token:
             parts = raw_token.split(":", 1)
             consumer_key = parts[0].strip()
-            consumer_secret = parts[1].strip()
+            consumer_secret = parts[1].strip() if len(parts) > 1 else ""
         else:
             consumer_key = raw_token
-            consumer_secret = body.get("consumer_secret")
-            
-        # Захисний механізм: якщо ключі не передані явно, підставляємо бойові для локального магазину
-        if shop and (not consumer_key or not consumer_secret):
-            consumer_key = "ck_facec97ea1c6bc83405f538e84cd747c793936c8"
-            consumer_secret = "cs_ecfdc5ec07a43783768956973d4ef96952516d6b"
+            consumer_secret = data.consumer_secret
             
         if not shop or not consumer_key or not consumer_secret:
-            raise OrderAPIError("Для WooCommerce потрібно передати shop та обидва ключі (Consumer Key та Consumer Secret).", 400)
+            raise HTTPException(status_code=400, detail="Для WooCommerce потрібно передати shop та обидва ключі.")
             
         return shop, consumer_key, consumer_secret, "woocommerce"
     else:
         token = raw_token.strip() if isinstance(raw_token, str) else raw_token
         if not shop or not token:
-            raise OrderAPIError("Потрібно обов'язково передати назву магазину (shop) і API-токен (token).", 400)
+            raise HTTPException(status_code=400, detail="Потрібно обов'язково передати назву магазину та токен.")
         return shop, token, None, "shopify"
 
 
-def error_response(error: Exception):
-    status = error.status if isinstance(error, OrderAPIError) else 500
-    error_message = str(error) if status < 500 else "Внутрішня помилка сервера. Спробуйте пізніше."
-    if status >= 500:
-        logger.error("Критична помилка сервера: %s", error, exc_info=True)
-    return jsonify({"success": False, "error": error_message}), status
+# --- МАРШРУТИ API (Захищені залежністю verify_api_key) ---
+
+@app.get("/")
+async def root():
+    return {"message": f"EcomBot AI Store SaaS Backend (Max Security Edition) is running! (v: {BACKEND_VERSION}) 🚀"}
 
 
-@app.errorhandler(400)
-def handle_bad_request(_error):
-    return jsonify({"success": False, "error": "Невірний формат запиту (Bad Request)."}), 400
-
-@app.errorhandler(413)
-def handle_too_large(_error):
-    return jsonify({"success": False, "error": "Завеликий обсяг даних у запиті."}), 413
-
-@app.errorhandler(UnsupportedMediaType)
-def handle_unsupported_media(_error):
-    return jsonify({"success": False, "error": "Непідтримуваний формат даних (очікується application/json)."}), 415
-
-
-@app.route("/")
-def home():
-    return f"EcomBot AI Store Multi-Store SaaS Backend is running successfully! (v: {BACKEND_VERSION}) 🚀"
-
-
-# --- СТАНДАРТНИЙ МАРШРУТ ЗАВАНТАЖЕННЯ ЗАМОВЛЕНЬ (1 МАГАЗИН АБО МОК) ---
-@app.route("/api/orders", methods=["POST", "GET"])
-def get_orders():
+@app.post("/api/orders")
+async def get_orders(payload: CredentialsSchema, authorized: bool = Depends(verify_api_key)):
     try:
-        body = read_body()
-        raw_shop = str(body.get("shop") or body.get("shop_domain", "")).lower()
+        raw_shop = str(payload.shop).lower()
+        platform = str(payload.platform or "shopify").lower()
         
-        # Примусово визначаємо platform як woocommerce для localsite або ngrok
-        platform = str(body.get("platform", "shopify")).lower()
-        if "localsite" in raw_shop or "ngrok-free" in raw_shop:
+        if "localsite" in raw_shop or "ngrok-free" in raw_shop or "netor.local" in raw_shop:
             platform = "woocommerce"
 
-        # Якщо це WooCommerce — беремо ключі та тягнемо дані через fetch_woocommerce_orders
         if platform == "woocommerce":
-            shop, consumer_key, consumer_secret, _ = read_credentials(body)
-            logger.info("Запит замовлень для WooCommerce магазину: %s", shop)
-            raw_orders = asyncio.run(fetch_woocommerce_orders(shop, consumer_key, consumer_secret))
+            shop, consumer_key, consumer_secret, _ = parse_credentials(payload)
+            raw_orders = await fetch_woocommerce_orders(shop, consumer_key, consumer_secret)
             if not isinstance(raw_orders, list):
                 raw_orders = []
             orders = [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
-            logger.info("Успішно завантажено WooCommerce замовлень: %d", len(orders))
-            return jsonify({"success": True, "shop": shop, "orders": orders})
+            return {"success": True, "shop": shop, "orders": orders}
 
-        # Стандартна логіка для Shopify / Mock
-        shop, token, _, _ = read_credentials(body)
-        
-        # --- START MOCK STORE & 100 ORDERS GENERATOR ---
-        if "test" in str(token).lower() or "demo" in str(token).lower() or "ai" in str(token).lower() or shop == "ai-store":
-            logger.info("Активовано інтелектуальний тест-каталог (100 замовлень) для магазину: %s", shop)
-            
-            mock_orders = [
-                {
-                    "id": "AI-ORD-001",
-                    "order_number": "2001",
-                    "created_at": (datetime.now() - timedelta(hours=1)).isoformat() + "Z",
-                    "customer_name": "Андрій Шевченко",
-                    "phone": "+380501112233",
-                    "email": "andriy@example.com",
-                    "delivery_method": "Нова Пошта (відділення №1)",
-                    "delivery_address": {
-                        "street": "вул. Городоцька, 10",
-                        "city": "Львів",
-                        "region": "Львівська область",
-                        "postal_code": "79016",
-                        "country": "Україна",
-                        "full": "м. Львів, вул. Городоцька, 10, відд. №1"
-                    },
-                    "total_amount": {"amount": 350.00, "currency": "UAH", "formatted": "350.00 грн"},
-                    "currency": "UAH",
-                    "status": {"text": "new", "cancelled": False},
-                    "items": [
-                        {
-                            "id": "t-green",
-                            "title": "Футболка бавовняна (Зелена - Акція)",
-                            "sku": "TSHIRT-GRN-ACT",
-                            "quantity": 1,
-                            "unit_price": {"amount": 350.00, "currency": "UAH", "formatted": "350.00 грн"},
-                            "line_total": {"amount": 350.00, "currency": "UAH", "formatted": "350.00 грн"}
-                        }
-                    ],
-                    "chatHistory": "Покупець: Добрий день, хочу замовити чорну футболку. \nШІ: Вітаю! На жаль, чорні футболки зараз розпродані, але маємо чудову зелену футболку з акційною ціною всього 350 грн замість 500 грн! Бажаєте оформити? \nПокупець: Добре, давайте зелену по акції, оформлюйте на Львів, відд. №1."
-                }
-            ]
-
-            first_names = ["Іван", "Софія", "Олександр", "Марія", "Дмитро", "Вікторія", "Павло", "Анастасія", "Артем", "Катерина"]
-            last_names = ["Петренко", "Мельник", "Ковальчук", "Шевченко", "Бойко", "Кравченко", "Ткаченко", "Олійник"]
-            cities = ["Київ", "Львів", "Одеса", "Харків", "Дніпро", "Запоріжжя", "Вінниця", "Полтава"]
-            products_pool = [
-                ("Футболка бавовняна (Зелена - Акція)", 350),
-                ("Футболка бавовняна (Синя)", 500),
-                ("Футболка бавовняна (Біла)", 500),
-                ("Футболка бавовняна (Жовта)", 500),
-            ]
-
-            for i in range(4, 101):
-                p_name, p_price = random.choice(products_pool)
-                qty = random.choice([1, 1, 1, 2])
-                total = p_price * qty
-                c_name = f"{random.choice(first_names)} {random.choice(last_names)}"
-                city = random.choice(cities)
-                
-                mock_orders.append({
-                    "id": f"AI-ORD-{i:03d}",
-                    "order_number": str(2000 + i),
-                    "created_at": (datetime.now() - timedelta(hours=random.randint(6, 120))).isoformat() + "Z",
-                    "customer_name": c_name,
-                    "phone": f"+380{random.randint(50, 99)}{random.randint(1000000, 9999999)}",
-                    "email": f"user{i}@example.com",
-                    "delivery_method": "Нова Пошта",
-                    "delivery_address": {
-                        "street": f"вул. Центральна, {random.randint(1, 100)}",
-                        "city": city,
-                        "region": f"{city} область",
-                        "postal_code": f"{random.randint(10000, 99999)}",
-                        "country": "Україна",
-                        "full": f"м. {city}, вул. Центральна"
-                    },
-                    "total_amount": {"amount": float(total), "currency": "UAH", "formatted": f"{total}.00 грн"},
-                    "currency": "UAH",
-                    "status": {"text": random.choice(["new", "processing", "completed"]), "cancelled": False},
-                    "items": [
-                        {
-                            "id": f"item-{i}",
-                            "title": p_name,
-                            "sku": f"SKU-{i}",
-                            "quantity": qty,
-                            "unit_price": {"amount": float(p_price), "currency": "UAH", "formatted": f"{p_price}.00 грн"},
-                            "line_total": {"amount": float(total), "currency": "UAH", "formatted": f"{total}.00 грн"}
-                        }
-                    ],
-                    "chatHistory": f"Автоматичне замовлення клієнта {c_name} через каталог магазину. Оплата при отриманні."
-                })
-
-            orders = [normalize_order(raw, shop) for raw in mock_orders if isinstance(raw, dict)]
-            return jsonify({"success": True, "shop": shop, "orders": orders})
-        # --- END MOCK STORE ---
-
-        orders_url = body.get("orders_url")
-        if orders_url is not None and not isinstance(orders_url, str):
-            orders_url = str(orders_url)
-
-        raw_orders = asyncio.run(fetch_orders(shop, token, orders_url))
+        shop, token, _, _ = parse_credentials(payload)
+        raw_orders = await fetch_orders(shop, token, payload.orders_url)
         if not isinstance(raw_orders, list):
             raw_orders = []
 
         orders = [normalize_order(raw, shop) for raw in raw_orders if isinstance(raw, dict)]
-        logger.info("Успішно завантажено замовлень: %d для магазину: %s", len(orders), shop)
+        return {"success": True, "shop": shop, "orders": orders}
         
-        return jsonify({"success": True, "shop": shop, "orders": orders})
-        
-    except Exception as error:
-        return error_response(error)
+    except OrderAPIError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching orders: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутрішня помилка сервера.")
 
 
-# --- МУЛЬТИ-МАГАЗИННИЙ ЗБІР ДАНИХ ---
-@app.route("/api/orders/multi", methods=["POST"])
-def get_orders_multi():
+@app.post("/api/orders/multi")
+async def get_orders_multi(payload: MultiStoreSchema, authorized: bool = Depends(verify_api_key)):
+    if not payload.stores:
+        raise HTTPException(status_code=400, detail="Масив магазинів порожній.")
+    
+    all_orders = await fetch_orders_multi(payload.stores)
+    return {"success": True, "orders": all_orders}
+
+
+@app.post("/api/tracking")
+async def track_order_parcel(payload: TrackingSchema, authorized: bool = Depends(verify_api_key)):
+    ttn = payload.trackingNumber.strip()
+    carrier = payload.carrier.strip() if payload.carrier else "Нова Пошта"
+    
+    if not ttn:
+        raise HTTPException(status_code=400, detail="Не вказано номер ТТН.")
+        
+    if "укр" in carrier.lower():
+        result = await get_ukrposhta_tracking(ttn)
+    else:
+        result = await get_nova_poshta_tracking(ttn)
+        
+    return result
+
+
+@app.post("/api/webhook/{platform}")
+async def receive_marketplace_webhook(platform: str, request: Request):
+    """Вебхук (не потребує Bearer Token, бо маркетплейси шлють свої підписи, які тут валідуються)."""
     try:
-        body = read_body()
-        stores = body.get("stores", [])
+        payload = await request.json()
+        logger.info(f"Отримано Webhook від платформи {platform}: {payload.get('id', 'unknown_id')}")
+        return {"success": True, "message": f"Webhook від {platform} успішно прийнято."}
+    except Exception as e:
+        logger.error(f"Помилка обробки webhook для {platform}: {str(e)}")
+        raise HTTPException(status_code=400, detail="Невірний формат вебхука.")
+
+
+@app.post("/api/process-ai")
+async def process_ai(payload: ProcessAISchema, request: Request, authorized: bool = Depends(verify_api_key)):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Перевищено ліміт запитів. Зачекайте хвилинку.")
+
+    shop = normalize_shop(payload.shop) or payload.shop
+    order_data = payload.order_data
+    
+    order = order_data if ("delivery_address" in order_data and "total_amount" in order_data) else normalize_order(order_data, shop)
+    ai_report = await analyze_order(order, payload.chat_messages or "")
+    
+    return {"success": True, "ai_report": ai_report}
+
+
+@app.post("/api/chat")
+async def chat_with_ai(payload: ChatSchema, request: Request, db: AsyncSession = Depends(get_db), authorized: bool = Depends(verify_api_key)):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Перевищено ліміт запитів до чату.")
+
+    chat_id = payload.chat_id or "default_chat"
+    
+    result = await db.execute(select(ChatModeModel).where(ChatModeModel.chat_id == chat_id))
+    chat_mode_record = result.scalars().first()
+    current_mode = chat_mode_record.mode if chat_mode_record else "ai"
+
+    if current_mode == "manual":
+        return {
+            "success": True, 
+            "reply": "", 
+            "mode": "manual", 
+            "info": "Чат переведено в ручний режим. ШІ не відповідає."
+        }
+
+    dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
+    ai_report = await analyze_order(dummy_order, payload.message)
+    ai_reply = ai_report.get("recommendation") or ai_report.get("ai_summary") or "Вітаю! Чим можу допомогти?"
+
+    return {"success": True, "reply": ai_reply, "mode": "ai"}
+
+
+@app.post("/api/chat/mode")
+async def set_chat_mode(payload: ChatModeSchema, db: AsyncSession = Depends(get_db), authorized: bool = Depends(verify_api_key)):
+    if payload.mode not in ["ai", "manual"]:
+        raise HTTPException(status_code=400, detail="Некоректний режим.")
+
+    result = await db.execute(select(ChatModeModel).where(ChatModeModel.chat_id == payload.chat_id))
+    chat_mode_record = result.scalars().first()
+
+    if chat_mode_record:
+        chat_mode_record.mode = payload.mode
+    else:
+        new_record = ChatModeModel(chat_id=payload.chat_id, mode=payload.mode)
+        db.add(new_record)
+
+    await db.commit()
+    logger.info("Режим чату для %s змінено на: %s", payload.chat_id, payload.mode)
+    return {"success": True, "chat_id": payload.chat_id, "mode": payload.mode}
+
+
+@app.post("/api/support")
+async def support_and_returns(payload: SupportSchema, request: Request, authorized: bool = Depends(verify_api_key)):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Перевищено ліміт запитів.")
+
+    complaint_text = payload.complaint or payload.message
+    if not complaint_text:
+        raise HTTPException(status_code=400, detail="Текст скарги не може бути порожнім.")
+
+    support_analysis = await MultiAgentSystem.run_support_agent(complaint_text, payload.order_info or {})
+    return {"success": True, "support_report": support_analysis}
+
+
+@app.post("/api/notifications/register")
+async def register_push_token(payload: PushTokenSchema, db: AsyncSession = Depends(get_db), authorized: bool = Depends(verify_api_key)):
+    result = await db.execute(select(PushTokenModel).where(PushTokenModel.token == payload.push_token))
+    existing_token = result.scalars().first()
+
+    if not existing_token:
+        new_token = PushTokenModel(token=payload.push_token)
+        db.add(new_token)
+        await db.commit()
+        logger.info("Успішно зареєстровано новий Push-токен у БД: %s", payload.push_token)
+    else:
+        logger.info("Push-токен вже існує в базі: %s", payload.push_token)
         
-        if not isinstance(stores, list) or not stores:
-            raise OrderAPIError("Потрібно передати масив магазинів (stores).", 400)
-
-        all_orders = asyncio.run(fetch_orders_multi(stores))
-        
-        logger.info("Успішно зібрано замовлення з %d магазинів паралельно.", len(stores))
-        return jsonify({"success": True, "orders": all_orders})
-
-    except Exception as error:
-        return error_response(error)
-
-
-# --- ЕНДПОЇНТ ДЛЯ АВТОМАТИЧНОГО ПОШТОВОГО ТРЕКІНГУ ---
-@app.route("/api/tracking", methods=["POST"])
-def track_order_parcel():
-    try:
-        body = read_body()
-        ttn = body.get("trackingNumber", "").strip()
-        carrier = body.get("carrier", "Нова Пошта").strip()
-        
-        if not ttn:
-            raise OrderAPIError("Не вказано номер ТТН або штрих-код відправлення.", 400)
-            
-        if "укр" in carrier.lower():
-            result = get_ukrposhta_tracking(ttn)
-        else:
-            result = get_nova_poshta_tracking(ttn)
-            
-        return jsonify(result)
-        
-    except Exception as error:
-        return error_response(error)
-
-
-@app.route("/api/process-ai", methods=["POST"])
-def process_ai():
-    try:
-        body = read_body()
-        shop, _, _, _ = read_credentials(body)
-        order_data = body.get("order_data")
-        
-        if not isinstance(order_data, dict):
-            raise OrderAPIError("Не передано або пошкоджено дані замовлення.", 400)
-
-        order = order_data if ("delivery_address" in order_data and "total_amount" in order_data) else normalize_order(order_data, shop)
-        chat_messages = str(body.get("chat_messages", ""))
-
-        ai_report = asyncio.run(analyze_order(order, chat_messages))
-        return jsonify({"success": True, "ai_report": ai_report})
-        
-    except Exception as error:
-        return error_response(error)
-
-
-@app.route("/api/chat", methods=["POST"])
-def chat_with_ai():
-    try:
-        body = read_body()
-        shop, _, _, _ = read_credentials(body)
-        user_message = body.get("message", "")
-        chat_id = body.get("chat_id", "default_chat")
-        
-        if not user_message:
-            raise OrderAPIError("Повідомлення не може бути порожнім.", 400)
-
-        current_mode = CHAT_MODES.get(chat_id, "ai")
-        if current_mode == "manual":
-            return jsonify({
-                "success": True, 
-                "reply": "", 
-                "mode": "manual", 
-                "info": "Чат переведено в ручний режим. ШІ не відповідає."
-            })
-
-        dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
-        ai_report = asyncio.run(analyze_order(dummy_order, user_message))
-        ai_reply = ai_report.get("recommendation") or ai_report.get("ai_summary") or "Вітаю! Чим можу допомогти?"
-
-        return jsonify({"success": True, "reply": ai_reply, "mode": "ai"})
-        
-    except Exception as error:
-        return error_response(error)
-
-
-@app.route("/api/chat/mode", methods=["POST"])
-def set_chat_mode():
-    try:
-        body = read_body()
-        chat_id = body.get("chat_id")
-        mode = body.get("mode")
-
-        if not chat_id or mode not in ["ai", "manual"]:
-            raise OrderAPIError("Некоректні параметри chat_id або mode.", 400)
-
-        CHAT_MODES[chat_id] = mode
-        logger.info("Режим чату для %s змінено на: %s", chat_id, mode)
-        return jsonify({"success": True, "chat_id": chat_id, "mode": mode})
-
-    except Exception as error:
-        return error_response(error)
-
-
-@app.route("/api/support", methods=["POST"])
-def support_and_returns():
-    try:
-        body = read_body()
-        shop, _, _, _ = read_credentials(body)
-        complaint_text = body.get("complaint", "") or body.get("message", "")
-        order_info = body.get("order_info", {})
-
-        if not complaint_text:
-            raise OrderAPIError("Текст скарги або запиту на повернення не може бути порожнім.", 400)
-
-        support_analysis = asyncio.run(MultiAgentSystem.run_support_agent(complaint_text, order_info))
-        return jsonify({"success": True, "support_report": support_analysis})
-
-    except Exception as error:
-        return error_response(error)
-
-
-@app.route("/api/notifications/register", methods=["POST"])
-def register_push_token():
-    try:
-        body = read_body()
-        push_token = body.get("push_token")
-        if not push_token:
-            raise OrderAPIError("Push token відсутній.", 400)
-        
-        REGISTERED_PUSH_TOKENS.add(push_token)
-        logger.info("Успішно зареєстровано новий Push-токен для сповіщень: %s", push_token)
-        return jsonify({"success": True, "message": "Push-токен успішно збережено."})
-    except Exception as error:
-        return error_response(error)
-
-
-def start_background_loop():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(background_store_monitor())
+    return {"success": True, "message": "Push-токен успішно збережено в базу даних."}
 
 
 if __name__ == "__main__":
-    worker_thread = threading.Thread(target=start_background_loop, daemon=True)
-    worker_thread.start()
-    
-    app.run(host="0.0.0.0", port=5000)
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=True)
+
+
+

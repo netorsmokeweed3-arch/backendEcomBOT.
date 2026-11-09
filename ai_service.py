@@ -6,6 +6,7 @@ from agents import MultiAgentSystem, fetch_realtime_currency_rates
 logger = logging.getLogger(__name__)
 
 def standard_fields(order: dict) -> dict:
+    """Нормалізує базові поля замовлення у безпечний внутрішній формат."""
     safe_order = order if isinstance(order, dict) else {}
     address = safe_order.get("delivery_address") or safe_order.get("shipping_address") or {}
     total = safe_order.get("total_amount") or {}
@@ -100,6 +101,7 @@ def standard_fields(order: dict) -> dict:
 
 
 def fill_missing_fields(report: dict, extracted: dict) -> None:
+    """Безпечно доповнює звіт даними, які витягнув ШІ-агент."""
     if not isinstance(extracted, dict):
         return
 
@@ -141,7 +143,7 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
 
 
 async def analyze_order(order: dict, chat_messages: str) -> dict:
-    """Головна точка входу: формує звіт, задіює Агента 1 (для чату) або Агента 2 (для аналізу замовлення)."""
+    """Головна точка входу: визначає контекст (чат чи замовлення) та спрямовує до агента."""
     report = standard_fields(order)
     
     currency_data = await fetch_realtime_currency_rates()
@@ -151,13 +153,17 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
 
     try:
         if is_chat_request:
-            # Викликаємо Агента 1 (Продавець) через MultiAgentSystem
             reply_text = await MultiAgentSystem.run_sales_agent(chat_messages, "")
             return {"recommendation": reply_text, "ai_summary": reply_text}
 
-        # Викликаємо Агента 2 (Аналітик та Парсер) для обробки замовлення
+        # Якщо структура крива — перевіряємо через нашого нового Агента 4 (Fallback Parser)
+        if not report.get("order_number") or not report.get("customer_name"):
+            raw_str = json.dumps(order, ensure_ascii=False)
+            parsed_data = await MultiAgentSystem.run_fallback_parser_agent(raw_str)
+            if parsed_data:
+                fill_missing_fields(report, parsed_data)
+
         extracted = await MultiAgentSystem.run_analytics_agent(order, chat_messages)
-        
         fill_missing_fields(report, extracted)
         
         summary = extracted.get("ai_summary")
