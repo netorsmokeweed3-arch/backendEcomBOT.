@@ -6,6 +6,7 @@ httpx
 sentry_sdk
 greenlet
 sqlalchemy
+aiosqlite
 cryptography
 pydantic
 fastapi
