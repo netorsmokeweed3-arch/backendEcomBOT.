@@ -3,3 +3,8 @@ requests
 anthropic
 gunicorn
 httpx
+sentry_sdk
+greenlet
+sqlalchemy
+cryptography
+pydantic
