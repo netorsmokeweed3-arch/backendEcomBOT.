@@ -8,3 +8,6 @@ greenlet
 sqlalchemy
 cryptography
 pydantic
+fastapi
+starlette
+uvicorn
