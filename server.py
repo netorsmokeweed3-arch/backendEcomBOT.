@@ -60,7 +60,6 @@ MASTER_API_KEY = os.getenv("APP_MASTER_API_KEY", "netor-secure-saas-secret-key-2
 
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
     """Перевірка Bearer Token для захисту від несанкціонованого доступу хакерів."""
-    # Якщо розробка або ключ збігається — пропускаємо
     if not MASTER_API_KEY:
         return True
     
@@ -114,7 +113,6 @@ app = FastAPI(
 )
 
 # --- ПРОДАКШН-ФІЛЬТРАЦІЯ CORS ---
-# Можна винести дозволені домени у змінну середовища ALLOWED_ORIGINS через кому
 raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 origins_list = [o.strip() for o in raw_origins.split(",")] if raw_origins != "*" else ["*"]
 
@@ -206,7 +204,7 @@ def parse_credentials(data: CredentialsSchema):
         return shop, token, None, "shopify"
 
 
-# --- МАРШРУТИ API (Захищені залежністю verify_api_key) ---
+# --- МАРШРУТИ API ---
 
 @app.get("/")
 async def root():
@@ -272,7 +270,6 @@ async def track_order_parcel(payload: TrackingSchema, authorized: bool = Depends
 
 @app.post("/api/webhook/{platform}")
 async def receive_marketplace_webhook(platform: str, request: Request):
-    """Вебхук (не потребує Bearer Token, бо маркетплейси шлють свої підписи, які тут валідуються)."""
     try:
         payload = await request.json()
         logger.info(f"Отримано Webhook від платформи {platform}: {payload.get('id', 'unknown_id')}")
@@ -376,6 +373,3 @@ async def register_push_token(payload: PushTokenSchema, db: AsyncSession = Depen
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=True)
-
-
-

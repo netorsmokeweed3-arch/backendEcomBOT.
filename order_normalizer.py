@@ -424,6 +424,24 @@ async def fetch_woocommerce_orders(shop_url: str, enc_ck: str, enc_cs: str) -> l
             raise OrderAPIError(f"Не вдалося підключитися до WooCommerce «{shop_url}».", 502) from error
 
 
+async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
+    """Сумісна обгортка для server.py, щоб імпорт fetch_orders працював безпомилково."""
+    clean_shop = normalize_shop(shop) or shop
+    if "woocommerce" in clean_shop.lower() or ":" in token:
+        parts = token.split(":", 1)
+        ck = parts[0].strip()
+        cs = parts[1].strip() if len(parts) > 1 else ""
+        return await fetch_woocommerce_orders(shop, ck, cs)
+    else:
+        try:
+            from clients.prom_client import PromClient
+            client = PromClient(shop, {"token": token})
+            return await client.fetch_orders()
+        except ImportError:
+            # Fallback якщо кастомний клієнт ще не ініціалізований
+            return []
+
+
 async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not isinstance(stores, list) or not stores:
         return []
@@ -436,14 +454,13 @@ async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any
         
         try:
             raw_orders = []
-            if platform == "woocommerce":
+            if platform == "woocommerce" or "consumer_key" in credentials:
                 ck = credentials.get("consumer_key", "")
                 cs = credentials.get("consumer_secret", "")
                 raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
             else:
-                ck = credentials.get("consumer_key", "")
-                cs = credentials.get("consumer_secret", "")
-                raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
+                token = credentials.get("token", "")
+                raw_orders = await fetch_orders(shop, token)
 
             return [normalize_order(raw_ord, shop) for raw_ord in raw_orders if isinstance(raw_ord, dict)]
 
