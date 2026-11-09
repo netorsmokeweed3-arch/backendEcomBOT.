@@ -96,53 +96,55 @@ FIELD_SYNONYMS = {
         "contact_name", "contactName", "receiver", "recipient", "pib", "fio"
     ],
     "first_name": [
-        "customer.first_name", "customer.firstName", "buyer.first_name", "client.first_name",
-        "shipping_address.first_name", "shippingAddress.first_name", "billing_address.first_name",
-        "client_first_name", "first_name", "firstName", "fname", "given_name", "givenName", "imya"
+        "billing.first_name", "shipping.first_name", "customer.first_name", "customer.firstName", 
+        "buyer.first_name", "client.first_name", "shipping_address.first_name", "shippingAddress.first_name", 
+        "billing_address.first_name", "billingAddress.first_name", "client_first_name", "first_name", 
+        "firstName", "fname", "given_name", "givenName", "imya"
     ],
     "last_name": [
-        "customer.last_name", "customer.lastName", "buyer.last_name", "client.last_name",
-        "shipping_address.last_name", "shippingAddress.last_name", "billing_address.last_name",
-        "client_last_name", "last_name", "lastName", "lname", "surname", "family_name", "prizvyshche"
+        "billing.last_name", "shipping.last_name", "customer.last_name", "customer.lastName", 
+        "buyer.last_name", "client.last_name", "shipping_address.last_name", "shippingAddress.last_name", 
+        "billing_address.last_name", "billingAddress.last_name", "client_last_name", "last_name", 
+        "lastName", "lname", "surname", "family_name", "prizvyshche"
     ],
     "phone": [
-        "shipping_address.phone", "shippingAddress.phone", "delivery_address.phone",
-        "customer.phone", "buyer.phone", "client.phone", "phone",
+        "billing.phone", "shipping.phone", "shipping_address.phone", "shippingAddress.phone", 
+        "delivery_address.phone", "customer.phone", "buyer.phone", "client.phone", "phone",
         "billing_address.phone", "billingAddress.phone", "delivery.phone", "telephone", 
         "phone_number", "phoneNumber", "contact_phone", "client_phone", "mobile", "cellphone"
     ],
     "email": [
-        "email", "customer.email", "buyer.email", "client.email", "shipping_address.email", 
-        "shippingAddress.email", "billing_address.email", "billingAddress.email", "client_email", 
-        "customer_email", "mail", "contact_email", "contactEmail", "customer.mail", "e_mail"
+        "billing.email", "shipping.email", "email", "customer.email", "buyer.email", "client.email", 
+        "shipping_address.email", "shippingAddress.email", "billing_address.email", "billingAddress.email", 
+        "client_email", "customer_email", "mail", "contact_email", "contactEmail", "customer.mail", "e_mail"
     ],
     "street": [
-        "shipping_address.address1", "shippingAddress.address1", "delivery_address.street",
-        "deliveryAddress.street", "delivery.address", "address1", "address", "street", 
+        "billing.address_1", "shipping.address_1", "shipping_address.address1", "shippingAddress.address1", 
+        "delivery_address.street", "deliveryAddress.street", "delivery.address", "address1", "address", "street", 
         "shipping_address.street", "billing_address.address1", "billingAddress.address1", "line1"
     ],
     "street2": [
-        "shipping_address.address2", "shippingAddress.address2", "delivery_address.address2",
-        "deliveryAddress.address2", "address2", "apartment", "apt", "suite", "unit", 
+        "billing.address_2", "shipping.address_2", "shipping_address.address2", "shippingAddress.address2", 
+        "delivery_address.address2", "deliveryAddress.address2", "address2", "apartment", "apt", "suite", "unit", 
         "billing_address.address2", "billingAddress.address2", "line2", "building", "house"
     ],
     "city": [
-        "shipping_address.city", "shippingAddress.city", "delivery_address.city",
+        "billing.city", "shipping.city", "shipping_address.city", "shippingAddress.city", "delivery_address.city",
         "deliveryAddress.city", "delivery.city", "city", "billing_address.city", "billingAddress.city", 
         "town", "locality", "municipality", "settlement", "misto", "naselenyy_punkt", "gorod"
     ],
     "region": [
-        "shipping_address.province", "shipping_address.state", "delivery_address.region",
+        "billing.state", "shipping.state", "shipping_address.province", "shipping_address.state", "delivery_address.region",
         "deliveryAddress.region", "province", "region", "state", "billing_address.province", 
         "billingAddress.province", "territory", "county", "oblast", "area"
     ],
     "postal_code": [
-        "shipping_address.zip", "shipping_address.postal_code", "delivery_address.postal_code",
+        "billing.postcode", "shipping.postcode", "shipping_address.zip", "shipping_address.postal_code", "delivery_address.postal_code",
         "deliveryAddress.postal_code", "zip", "postal_code", "postcode", "zip_code", 
         "zipCode", "billing_address.zip", "billingAddress.zip"
     ],
     "country": [
-        "shipping_address.country", "delivery_address.country", "country_name", 
+        "billing.country", "shipping.country", "shipping_address.country", "delivery_address.country", "country_name", 
         "country", "billing_address.country", "billingAddress.country", "country_code"
     ],
     "delivery_method": [
@@ -312,28 +314,73 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
     currency = to_text(find(raw, "currency")) or "UAH"
 
-    first = to_text(find(raw, "first_name")) or to_text(get_path(raw, "customer.first_name"))
-    last = to_text(find(raw, "last_name")) or to_text(get_path(raw, "customer.last_name"))
+    # Прямий витяг з об'єктів WooCommerce (billing / shipping / customer)
+    billing = raw.get("billing", {}) if isinstance(raw.get("billing"), dict) else {}
+    shipping = raw.get("shipping", {}) if isinstance(raw.get("shipping"), dict) else {}
+
+    first = (
+        to_text(find(raw, "first_name")) 
+        or to_text(get_path(raw, "customer.first_name"))
+        or to_text(billing.get("first_name"))
+        or to_text(shipping.get("first_name"))
+    )
+    last = (
+        to_text(find(raw, "last_name")) 
+        or to_text(get_path(raw, "customer.last_name"))
+        or to_text(billing.get("last_name"))
+        or to_text(shipping.get("last_name"))
+    )
     customer_name = (
         " ".join(part for part in (first, last) if part) 
+        or to_text(billing.get("company"))
         or to_text(get_path(raw, "customer.name"))
         or to_text(find(raw, "customer_name"))
         or "Гість"
     )
 
-    street = to_text(get_path(raw, "shipping_address.address1")) or to_text(find(raw, "street"))
-    street2 = to_text(get_path(raw, "shipping_address.address2")) or to_text(find(raw, "street2"))
+    street = (
+        to_text(get_path(raw, "shipping_address.address1")) 
+        or to_text(find(raw, "street"))
+        or to_text(shipping.get("address_1"))
+        or to_text(billing.get("address_1"))
+    )
+    street2 = (
+        to_text(get_path(raw, "shipping_address.address2")) 
+        or to_text(find(raw, "street2"))
+        or to_text(shipping.get("address_2"))
+        or to_text(billing.get("address_2"))
+    )
     full_street = " ".join(part for part in (street, street2) if part) or string_address(raw)
 
-    city = to_text(get_path(raw, "shipping_address.city")) or to_text(find(raw, "city"))
-    region = to_text(get_path(raw, "shipping_address.province")) or to_text(find(raw, "region"))
-    postal_code = to_text(get_path(raw, "shipping_address.zip")) or to_text(find(raw, "postal_code"))
-    country = to_text(get_path(raw, "shipping_address.country")) or to_text(find(raw, "country"))
+    city = (
+        to_text(get_path(raw, "shipping_address.city")) 
+        or to_text(find(raw, "city"))
+        or to_text(shipping.get("city"))
+        or to_text(billing.get("city"))
+    )
+    region = (
+        to_text(get_path(raw, "shipping_address.province")) 
+        or to_text(find(raw, "region"))
+        or to_text(shipping.get("state"))
+        or to_text(billing.get("state"))
+    )
+    postal_code = (
+        to_text(get_path(raw, "shipping_address.zip")) 
+        or to_text(find(raw, "postal_code"))
+        or to_text(shipping.get("postcode"))
+        or to_text(billing.get("postcode"))
+    )
+    country = (
+        to_text(get_path(raw, "shipping_address.country")) 
+        or to_text(find(raw, "country"))
+        or to_text(shipping.get("country"))
+        or to_text(billing.get("country"))
+    )
     
     full_address = ", ".join(part for part in (country, region, city, full_street, postal_code) if part)
 
-    phone = to_text(find(raw, "phone"))
-    email = to_text(find(raw, "email"))
+    phone = to_text(find(raw, "phone")) or to_text(billing.get("phone")) or to_text(shipping.get("phone"))
+    email = to_text(find(raw, "email")) or to_text(billing.get("email")) or to_text(shipping.get("email"))
     chat_history = raw.get("chat_history") or raw.get("dialog_history") or ""
 
     base_dict = {
