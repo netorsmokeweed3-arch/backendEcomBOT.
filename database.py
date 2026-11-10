@@ -1,6 +1,6 @@
-"""Модуль бази даних для SaaS-платформи (Enterprise Edition - Hardened & Atomic).
-Асинхронний SQLAlchemy рушій з пулом з'єднань, захистом від гонки потоків,
-WAL-режимом для SQLite та підтримкою атомарних транзакцій (Race Condition Prevention).
+"""Модуль бази даних для SaaS-платформи (Enterprise Edition - Multi-Tenancy & Atomic).
+Асинхронний SQLAlchemy рушій із підтримкою користувачів, ізоляцією даних, WAL-режимом
+та вбудованим шифруванням чутливих даних у спокої (Encryption at Rest).
 """
 
 import os
@@ -8,10 +8,37 @@ import logging
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, event, select
+from sqlalchemy import String, Text, event, select, ForeignKey
 from sqlalchemy.pool import AsyncAdaptedQueuePool
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
+
+# --- КРИПТОГРАФІЧНИЙ ЗАХИСТ (Fail-Fast для Encryption Key) ---
+ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise RuntimeError(
+        "КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: Змінна середовища APP_ENCRYPTION_KEY не задана! "
+        "Шифрування даних у спокої вимагає постійного ключа."
+    )
+
+cipher_suite = Fernet(ENCRYPTION_KEY.encode("utf-8") if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
+
+def encrypt_credential(plain_text: str) -> str:
+    """Шифрує рядок перед збереженням у базу даних."""
+    if not plain_text:
+        return ""
+    return cipher_suite.encrypt(plain_text.encode("utf-8")).decode("utf-8")
+
+def decrypt_credential(encrypted_text: str) -> str:
+    """Розшифровує рядок із бази даних."""
+    if not encrypted_text:
+        return ""
+    try:
+        return cipher_suite.decrypt(encrypted_text.encode("utf-8")).decode("utf-8")
+    except Exception as e:
+        logger.critical(f"КРИТИЧНА ПОМИЛКА ШИФРУВАННЯ БД: Неможливо розшифрувати дані. Деталі: {e}")
+        raise
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ecom_database.db")
 
@@ -50,6 +77,13 @@ class Base(DeclarativeBase):
     pass
 
 
+class UserModel(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class PushTokenModel(Base):
     __tablename__ = "push_tokens"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -65,6 +99,7 @@ class ChatModeModel(Base):
 class StoreCredentialModel(Base):
     __tablename__ = "store_credentials"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     platform: Mapped[str] = mapped_column(String(50), default="shopify", nullable=False)
     encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False)

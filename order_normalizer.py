@@ -16,9 +16,15 @@ from cryptography.fernet import Fernet
 logger = logging.getLogger("ecom_engine")
 logger.setLevel(logging.INFO)
 
-# Ключ шифрування токенів у сховищі
-ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY", Fernet.generate_key())
-cipher_suite = Fernet(ENCRYPTION_KEY)
+# --- ЗАХИСТ (Fail-Fast для Encryption Key) ---
+ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise RuntimeError(
+        "КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: Змінна середовища APP_ENCRYPTION_KEY не задана! "
+        "Генерація випадкового ключа в рантаймі заборонена, щоб уникнути втрати доступу до токенів у БД."
+    )
+
+cipher_suite = Fernet(ENCRYPTION_KEY.encode("utf-8") if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
 
 # Безпечний кортеж порожніх значень для перевірок
 EMPTY = (None, "", (), {}, "None", "null", "N/A", "n/a")
@@ -419,19 +425,29 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
 
 def decrypt_token_ephemeral(encrypted_token: str) -> str:
+    """Розшифровує токен з використанням Fernet. 
+    При криптографічній помилці логує критичну проблему і кидає OrderAPIError замість маскування.
+    """
     try:
         decrypted_bytes = cipher_suite.decrypt(encrypted_token.encode('utf-8'))
         return decrypted_bytes.decode('utf-8')
-    except Exception:
-        return encrypted_token
+    except Exception as e:
+        logger.critical(
+            f"КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: Не вдалося розшифрувати токен доступу. "
+            f"Ймовірно, було змінено APP_ENCRYPTION_KEY або дані пошкоджено. Деталі: {e}"
+        )
+        raise OrderAPIError("Помилка безпеки: неможливо розшифрувати дані авторизації магазину.", 500)
 
 
 async def fetch_woocommerce_orders(shop_url: str, enc_ck: str, enc_cs: str) -> list:
     try:
         consumer_key = decrypt_token_ephemeral(enc_ck)
         consumer_secret = decrypt_token_ephemeral(enc_cs)
-    except Exception:
-        consumer_key, consumer_secret = enc_ck, enc_cs
+    except OrderAPIError:
+        raise
+    except Exception as e:
+        logger.error(f"Неочікувана помилка розшифрування для {shop_url}: {e}")
+        raise OrderAPIError("Внутрішня помилка шифрування.", 500)
 
     clean_url = shop_url.rstrip("/")
     if not clean_url.startswith("http"):

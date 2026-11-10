@@ -70,8 +70,7 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
     rates_info = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as httpx_client:
-            # ЧИСТИЙ URL БЕЗ ЖОДНИХ МАРКДАУН-ДУЖОК:
-            response = await httpx_client.get("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json")
+            response = await httpx_client.get("[https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json](https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json)")
             
             if response.status_code == 200:
                 data = response.json()
@@ -100,24 +99,44 @@ def _sanitize_input(text: Any) -> str:
 
 
 def _safe_parse_json(text: str) -> Dict[str, Any]:
+    """Безпечний парсер JSON без жадібних регулярних виразів. 
+    Використовує JSONDecoder.raw_decode для точного витягування валідного JSON-об'єкта.
+    """
     if not isinstance(text, str) or not text.strip():
         return {}
     
     cleaned_text = text.strip()
-    if cleaned_text.startswith("```"):
-        lines = cleaned_text.splitlines()
-        if len(lines) > 2:
-            cleaned_text = "\n".join(lines[1:-1]).strip()
-
-    match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
-    if not match:
-        return {"raw_response": cleaned_text}
     
+    # Очищення від markdown-обгорток (```json ... ```)
+    cleaned_text = re.sub(r"^```(?:json)?\s*", "", cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
+    cleaned_text = re.sub(r"\s*```$", "", cleaned_text, flags=re.MULTILINE)
+    cleaned_text = cleaned_text.strip()
+
+    # Точне витягування JSON за допомогою raw_decode
     try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {"raw_response": cleaned_text}
-    except json.JSONDecodeError:
-        return {"raw_response": cleaned_text}
+        idx = cleaned_text.find('{')
+        if idx == -1:
+            idx = cleaned_text.find('[')
+        
+        if idx != -1:
+            parsed, _ = json.JSONDecoder().raw_decode(cleaned_text, idx)
+            if isinstance(parsed, dict):
+                return parsed
+            elif isinstance(parsed, list):
+                return {"items": parsed}
+    except Exception:
+        pass
+
+    match = re.search(r'(\{[\s\S]*\})', cleaned_text)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return {"raw_response": cleaned_text}
 
 
 async def _call_claude_with_retry(system_prompt: str, user_prompt: str, max_tokens: int = 400) -> str:
