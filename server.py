@@ -13,10 +13,12 @@ from contextlib import asynccontextmanager
 import hmac
 import hashlib
 from datetime import datetime, timedelta
+from pathlib import Path
 
-# Автоматичне завантаження змінних з локального файлу .env
-from dotenv import load_dotenv
-load_dotenv()
+# Автоматичне завантаження змінних з локального файлу .env (якщо він існує)
+if Path(".env").exists():
+    from dotenv import load_dotenv
+    load_dotenv()
 
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
