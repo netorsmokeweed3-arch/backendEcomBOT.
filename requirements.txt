@@ -19,3 +19,5 @@ greenlet
 requests
 flask
 python-dotenv
+pytest
+pytest-asyncio
