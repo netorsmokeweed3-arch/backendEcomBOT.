@@ -145,4 +145,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             logger.warning(f"Транзакцію скасовано через помилку (Rollback виконано): {str(e)}")
             raise
         finally:
-            await session.close()
+            await session.close()  
+
+
