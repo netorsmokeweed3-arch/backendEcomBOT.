@@ -1,4 +1,4 @@
-"""Модуль бази даних для SaaS-платформи (Enterprise Edition - Multi-Tenancy & Atomic).
+"""Модуль бази даних для SaaS-платформи (OmniFlow Enterprise - Multi-Tenancy & Audit Logs).
 Асинхронний SQLAlchemy рушій із підтримкою користувачів, ізоляцією даних, WAL-режимом
 та вбудованим шифруванням чутливих даних у спокої (Encryption at Rest).
 """
@@ -8,9 +8,10 @@ import logging
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, event, select, ForeignKey
+from sqlalchemy import String, Text, event, select, ForeignKey, DateTime
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 from cryptography.fernet import Fernet
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,17 @@ class StoreCredentialModel(Base):
     encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class AuditLogModel(Base):
+    """Таблиця для логування помилок синхронізації з маркетплейсами."""
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    shop_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)  # напр. "SYNC_ERROR", "SUCCESS"
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 async def init_db() -> None:
     try:
         async with engine.begin() as conn:
@@ -124,7 +136,6 @@ async def close_db() -> None:
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency для FastAPI з авто-комітом, відкатом та захистом від гонки (Atomic)."""
     async with AsyncSessionLocal() as session:
         try:
             yield session

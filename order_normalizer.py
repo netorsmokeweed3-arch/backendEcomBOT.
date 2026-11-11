@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 import httpx
 from cryptography.fernet import Fernet
 
-logger = logging.getLogger("ecom_engine")
+logger = logging.getLogger("omniflow_engine")
 logger.setLevel(logging.INFO)
 
 # --- ЗАХИСТ (Fail-Fast для Encryption Key) ---
@@ -516,17 +516,24 @@ async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any
         credentials = store_info.get("credentials", {})
         
         try:
-            raw_orders = []
-            if platform == "woocommerce" or "consumer_key" in credentials:
-                ck = credentials.get("consumer_key", "")
-                cs = credentials.get("consumer_secret", "")
-                raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
-            else:
-                token = credentials.get("token", "")
-                raw_orders = await fetch_orders(shop, token)
+            # Захист окремого магазину таймаутом у 30 секунд, щоб повільна мережа не блокувала все
+            async def _do_fetch():
+                raw_orders = []
+                if platform == "woocommerce" or "consumer_key" in credentials:
+                    ck = credentials.get("consumer_key", "")
+                    cs = credentials.get("consumer_secret", "")
+                    raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
+                else:
+                    token = credentials.get("token", "")
+                    raw_orders = await fetch_orders(shop, token)
+                return raw_orders
 
+            raw_orders = await asyncio.wait_for(_do_fetch(), timeout=30.0)
             return [normalize_order(raw_ord, shop) for raw_ord in raw_orders if isinstance(raw_ord, dict)]
 
+        except asyncio.TimeoutError:
+            logger.error(f"Таймаут (30с) при опитуванні магазину {shop}")
+            return []
         except Exception as e:
             logger.error(f"Failed to fetch orders for store {shop}: {str(e)}")
             return []
@@ -540,3 +547,5 @@ async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any
             all_orders.extend(res)
             
     return all_orders
+
+

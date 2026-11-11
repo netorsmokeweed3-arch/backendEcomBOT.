@@ -1,6 +1,6 @@
-"""Enterprise Async SaaS Backend (FastAPI Edition + Distributed Redis & Max Security).
+"""OmniFlow Enterprise SaaS Backend (FastAPI Edition + Distributed Redis & Max Security).
 Розподілений Rate Limiter по user_id, ідемпотентність вебхуків через Redis,
-ізоляція транзакцій БД (захист від вичерпання пулу з'єднань) та повна безпека.
+ізоляція транзакцій БД, аудит помилок та повна безпека.
 """
 
 import os
@@ -44,7 +44,7 @@ if SENTRY_DSN:
     )
 
 # Внутрішні модулі системи та БД
-from database import init_db, close_db, AsyncSessionLocal, ChatModeModel, PushTokenModel, UserModel
+from database import init_db, close_db, AsyncSessionLocal, ChatModeModel, PushTokenModel, UserModel, AuditLogModel
 from ai_service import analyze_order
 from agents import MultiAgentSystem
 from order_normalizer import (
@@ -73,7 +73,7 @@ root_logger.handlers = [handler]
 
 logger = logging.getLogger(__name__)
 
-BACKEND_VERSION = "5.0.2-fastapi-enterprise-ultimate"
+BACKEND_VERSION = "5.1.0-omniflow-enterprise-ultimate"
 
 dispatcher = MarketplaceDispatcher(max_concurrent=5)
 
@@ -86,12 +86,12 @@ memory_rate_limit: Dict[str, List[float]] = {}
 rate_limit_lock = asyncio.Lock()
 
 # --- БЕЗПЕКА ТА JWT АВТОРИЗАЦІЯ ---
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "netor-super-secure-jwt-secret-key-2026")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "omniflow-super-secure-jwt-secret-key-2026")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 72
 
 security_scheme = HTTPBearer(auto_error=False)
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "netor-webhook-hmac-secret-2026")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "omniflow-webhook-hmac-secret-2026")
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -104,6 +104,22 @@ def create_access_token(data: dict) -> str:
     expire = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+async def log_audit_event(user_id: int, shop_domain: str, event_type: str, message: str) -> None:
+    """Асинхронно записує подію або помилку в таблицю audit_logs для клієнта."""
+    try:
+        async with AsyncSessionLocal() as db:
+            audit_entry = AuditLogModel(
+                user_id=user_id,
+                shop_domain=shop_domain or "unknown_shop",
+                event_type=event_type,
+                message=message
+            )
+            db.add(audit_entry)
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Не вдалося записати подію в audit_logs: {e}")
+
 
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)) -> int:
     """Витягує та верифікує user_id з JWT токена (Tenant Isolation)."""
@@ -141,7 +157,6 @@ async def check_rate_limit(identifier: str, max_requests: int = 30, window_secon
         except Exception as e:
             logger.warning(f"Збій Redis у Rate Limiter: {e}")
 
-    # Фолбек на локальну пам'ять
     async with rate_limit_lock:
         if identifier not in memory_rate_limit:
             memory_rate_limit[identifier] = []
@@ -159,13 +174,13 @@ async def lifespan(app: FastAPI):
         try:
             redis_client = aioredis.from_url(REDIS_URL, decode_responses=True, encoding="utf-8")
             await redis_client.ping()
-            logger.info("Успішно підключено до Redis! ⚡")
+            logger.info("OmniFlow: Успішно підключено до Redis! ⚡")
         except Exception as e:
             logger.error(f"Не вдалося підключитися до Redis: {e}")
             redis_client = None
 
     await init_db()
-    logger.info("Базу даних ініціалізовано! 🗄️")
+    logger.info("OmniFlow: Базу даних ініціалізовано! 🗄️")
 
     monitor_task = asyncio.create_task(background_store_monitor())
     yield
@@ -174,11 +189,11 @@ async def lifespan(app: FastAPI):
     if redis_client:
         await redis_client.close()
     await close_db()
-    logger.info("Сервер зупинено.")
+    logger.info("OmniFlow: Сервер зупинено.")
 
 
 app = FastAPI(
-    title="EcomBot AI Store SaaS API (Ultimate Enterprise)",
+    title="OmniFlow Enterprise SaaS API",
     version=BACKEND_VERSION,
     lifespan=lifespan
 )
@@ -303,23 +318,20 @@ async def login(payload: UserLoginSchema, request: Request):
         return {"success": True, "token": token, "user": {"id": user.id, "email": user.email}}
 
 
-# --- МАРШРУТИ API (Ізольовані та оптимізовані) ---
+# --- МАРШРУТИ API ---
 
 @app.get("/")
 async def root():
-    return {"message": f"EcomBot AI Store SaaS Backend (Ultimate Enterprise) is running! (v: {BACKEND_VERSION}) 🚀"}
+    return {"message": f"OmniFlow Enterprise SaaS Backend is running! (v: {BACKEND_VERSION}) 🚀"}
 
 
 @app.post("/api/orders")
 async def get_orders(payload: CredentialsSchema, request: Request, user_id: int = Depends(get_current_user_id)):
-    # Рейт-ліміт за унікальним user_id замість IP
     if not await check_rate_limit(f"user:{user_id}:orders", max_requests=30):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів.")
 
     try:
-        raw_shop = str(payload.shop).lower()
         platform = str(payload.platform or "shopify").lower()
-        
         store_config = {
             "platform": platform,
             "shop": payload.shop,
@@ -330,17 +342,25 @@ async def get_orders(payload: CredentialsSchema, request: Request, user_id: int 
             }
         }
 
-        # Зовнішній виклик виконується поза транзакціями бази даних
         orders = await dispatcher.fetch_store_orders(store_config)
+        
+        # Успішний лог в аудиті
+        await log_audit_event(user_id, payload.shop, "SYNC_SUCCESS", f"Успішно завантажено {len(orders)} замовлень.")
         return {"success": True, "shop": payload.shop, "orders": orders}
         
     except OrderAPIError as e:
+        error_msg = str(e)
+        logger.error(f"OrderAPIError для магазину {payload.shop}: {error_msg}")
+        await log_audit_event(user_id, payload.shop, "SYNC_ERROR", error_msg)
+        
         if e.status in [401, 403]:
             return {"success": False, "token_expired": True, "error": "Токен доступу застарів."}
-        raise HTTPException(status_code=e.status, detail=str(e))
+        raise HTTPException(status_code=e.status, detail=error_msg)
     except Exception as e:
-        logger.error(f"Error fetching orders: {str(e)}", exc_info=True)
-        return {"success": False, "token_expired": True, "error": "Помилка авторизації в магазині."}
+        error_msg = str(e)
+        logger.error(f"Неочікувана помилка при отриманні замовлень: {error_msg}", exc_info=True)
+        await log_audit_event(user_id, payload.shop, "SYNC_CRITICAL_ERROR", error_msg)
+        return {"success": False, "token_expired": True, "error": "Помилка авторизації або з'єднання з магазином."}
 
 
 @app.post("/api/orders/multi")
@@ -370,7 +390,6 @@ async def track_order_parcel(payload: TrackingSchema, user_id: int = Depends(get
 
 @app.post("/api/webhook/{platform}")
 async def receive_marketplace_webhook(platform: str, request: Request, x_webhook_signature: Optional[str] = Header(None)):
-    """Безпечний вебхук із захистом HMAC-SHA256 та ІДЕМПОТЕНТНІСТЮ через Redis."""
     body_bytes = await request.body()
     
     if WEBHOOK_SECRET and x_webhook_signature:
@@ -379,13 +398,11 @@ async def receive_marketplace_webhook(platform: str, request: Request, x_webhook
             logger.warning(f"Невірний підпис вебхука від {platform}!")
             raise HTTPException(status_code=403, detail="Невірний криптографічний підпис.")
 
-    # --- Ідемпотентність вебхуків ---
     event_hash = hashlib.sha256(body_bytes).hexdigest()
     idempotency_key = f"webhook:processed:{platform}:{event_hash}"
     
     if redis_client:
         try:
-            # nx=True ставить ключ лише якщо його ще не було (TTL 300 секунд)
             is_new = await redis_client.set(idempotency_key, "processed", nx=True, ex=300)
             if not is_new:
                 logger.info(f"Отримано дублікат вебхука від {platform} (Idempotency Triggered). Пропускаємо.")
@@ -395,7 +412,7 @@ async def receive_marketplace_webhook(platform: str, request: Request, x_webhook
 
     try:
         payload = await request.json()
-        logger.info(f"Успішно прийнято новий Webhook від {platform}: {payload.get('id', 'N/A')}")
+        logger.info(f"OmniFlow: Успішно прийнято новий Webhook від {platform}: {payload.get('id', 'N/A')}")
         return {"success": True, "message": f"Webhook від {platform} оброблено."}
     except Exception as e:
         logger.error(f"Помилка обробки webhook для {platform}: {str(e)}")
@@ -410,9 +427,7 @@ async def process_ai(payload: ProcessAISchema, request: Request, user_id: int = 
     shop = normalize_shop(payload.shop) or payload.shop
     order = payload.order_data if ("delivery_address" in payload.order_data) else normalize_order(payload.order_data, shop)
     
-    # Виклик ШІ (Claude) виконується повністю поза транзакцією БД
     ai_report = await analyze_order(order, payload.chat_messages or "")
-    
     return {"success": True, "ai_report": ai_report}
 
 
@@ -423,7 +438,6 @@ async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Dep
 
     chat_id = payload.chat_id or "default_chat"
     
-    # Коротке з'єднання з БД виключно для читання режиму чату (ізоляція транзакції)
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ChatModeModel).where(ChatModeModel.chat_id == chat_id))
         chat_mode_record = result.scalars().first()
@@ -433,8 +447,6 @@ async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Dep
         return {"success": True, "reply": "", "mode": "manual", "info": "Чат у ручному режимі."}
 
     dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
-    
-    # Зовнішній виклик ШІ поза будь-якою сесією БД
     ai_report = await analyze_order(dummy_order, payload.message)
     ai_reply = ai_report.get("recommendation") or ai_report.get("ai_summary") or "Вітаю! Чим можу допомогти?"
 
@@ -446,7 +458,6 @@ async def set_chat_mode(payload: ChatModeSchema, user_id: int = Depends(get_curr
     if payload.mode not in ["ai", "manual"]:
         raise HTTPException(status_code=400, detail="Некоректний режим.")
 
-    # Коротке з'єднання для збереження режиму чату
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ChatModeModel).where(ChatModeModel.chat_id == payload.chat_id))
         chat_mode_record = result.scalars().first()
@@ -458,7 +469,6 @@ async def set_chat_mode(payload: ChatModeSchema, user_id: int = Depends(get_curr
 
         await db.commit()
 
-    logger.info("Режим чату для %s змінено на: %s", payload.chat_id, payload.mode)
     return {"success": True, "chat_id": payload.chat_id, "mode": payload.mode}
 
 
@@ -471,14 +481,12 @@ async def support_and_returns(payload: SupportSchema, request: Request, user_id:
     if not complaint_text:
         raise HTTPException(status_code=400, detail="Текст скарги не може бути порожнім.")
 
-    # Зовнішній виклик мультиагентної системи підтримки поза БД
     support_analysis = await MultiAgentSystem.run_support_agent(complaint_text, payload.order_info or {})
     return {"success": True, "support_report": support_analysis}
 
 
 @app.post("/api/notifications/register")
 async def register_push_token(payload: PushTokenSchema, user_id: int = Depends(get_current_user_id)):
-    # Коротке з'єднання для реєстрації push-токена
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(PushTokenModel).where(PushTokenModel.token == payload.push_token))
         if not result.scalars().first():
