@@ -12,12 +12,19 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 async def get_redis_cache() -> Optional[aioredis.Redis]:
-    """Підключається до Redis для кешування відповідей ШІ."""
+    """Підключається до Redis для кешування відповідей ШІ з безпечними таймаутами."""
     if not REDIS_URL:
         return None
     try:
-        return aioredis.from_url(REDIS_URL, decode_responses=True)
-    except Exception:
+        return aioredis.from_url(
+            REDIS_URL, 
+            decode_responses=True,
+            socket_timeout=5.0,
+            socket_connect_timeout=5.0,
+            health_check_interval=30
+        )
+    except Exception as e:
+        logger.warning(f"Не вдалося підключитися до Redis: {e}")
         return None
 
 
@@ -161,7 +168,6 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
 async def analyze_order(order: dict, chat_messages: str) -> dict:
     """Головна точка входу з інтегрованим Redis-кешуванням відповідей ШІ."""
     
-    # Генеруємо унікальний хеш для поточного стану замовлення та чату
     cache_payload = json.dumps({"order": order, "chat": chat_messages}, sort_keys=True, ensure_ascii=False)
     cache_key = f"ai_cache:{hashlib.sha256(cache_payload.encode('utf-8')).hexdigest()}"
     
@@ -187,7 +193,6 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
             reply_text = await MultiAgentSystem.run_sales_agent(chat_messages, "")
             result = {"recommendation": reply_text, "ai_summary": reply_text}
         else:
-            # Якщо структура крива — перевіряємо через нашого нового Агента 4 (Fallback Parser)[cite: 26]
             if not report.get("order_number") or not report.get("customer_name"):
                 raw_str = json.dumps(order, ensure_ascii=False)
                 parsed_data = await MultiAgentSystem.run_fallback_parser_agent(raw_str)
@@ -206,7 +211,6 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
 
             result = report
 
-        # Зберігаємо успішний результат у Redis на 15 хвилин (900 секунд)
         if redis:
             try:
                 await redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=900)
