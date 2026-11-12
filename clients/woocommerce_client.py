@@ -1,5 +1,3 @@
-"""Модуль інтеграції з WooCommerce API (Enterprise Edition)."""
-
 import logging
 from typing import List, Dict, Any
 from clients.base_client import BaseMarketplaceClient, OrderAPIError
@@ -19,20 +17,36 @@ class WooCommerceClient(BaseMarketplaceClient):
             clean_url = f"https://{clean_url}"
             
         url = f"{clean_url}/wp-json/wc/v3/orders"
-        params = {"per_page": 50}
-        if self.last_synced_at:
-            params["after"] = self.last_synced_at
         
+        all_orders = []
+        page = 1
+        per_page = 50
+
         try:
-            response = await self._make_request("GET", url, auth=(ck, cs), params=params)
-            
-            if response.status_code in [401, 403]:
-                raise OrderAPIError("Ключі доступу WooCommerce недійсні або застаріли.", response.status_code)
-            if response.status_code != 200:
-                raise OrderAPIError(f"WooCommerce API повернув помилку: код {response.status_code}", response.status_code)
+            while True:
+                params = {"per_page": per_page, "page": page}
+                if self.last_synced_at:
+                    params["after"] = self.last_synced_at
                 
-            data = response.json()
-            return data if isinstance(data, list) else []
+                response = await self._make_request("GET", url, auth=(ck, cs), params=params)
+                
+                if response.status_code in [401, 403]:
+                    raise OrderAPIError("Ключі доступу WooCommerce недійсні або застаріли.", response.status_code)
+                if response.status_code != 200:
+                    raise OrderAPIError(f"WooCommerce API повернув помилку: код {response.status_code}", response.status_code)
+                    
+                data = response.json()
+                if not isinstance(data, list) or not data:
+                    break
+                    
+                all_orders.extend(data)
+                
+                if len(data) < per_page:
+                    break
+                    
+                page += 1
+
+            return all_orders
                 
         except OrderAPIError:
             raise

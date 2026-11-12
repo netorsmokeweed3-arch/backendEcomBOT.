@@ -1,5 +1,5 @@
-"""Модуль управління чергою фонових завдань через Redis (Redis Lists).
-Відповідає за постановку задач у чергу (enqueue) через спільний Redis-пул.
+"""Модуль управління чергою фонових завдань через Redis (Reliable Queue з патерном ACK).
+Забезпечує гарантію доставки та виконання завдань навіть при збоях воркера.
 """
 
 import json
@@ -10,12 +10,12 @@ from redis_pool import get_redis
 
 logger = logging.getLogger(__name__)
 QUEUE_NAME = "queue:shop_sync"
+PROCESSING_QUEUE_NAME = "queue:shop_sync:processing"
 
 
 async def enqueue_shop_sync(shop_domain: str, user_id: int) -> bool:
     """
     Додає завдання на фонову синхронізацію магазину в кінець черги Redis (RPUSH).
-    Використовує єдиний спільний пул з'єднань.
     """
     client = await get_redis()
     if not client:
@@ -39,18 +39,42 @@ async def enqueue_shop_sync(shop_domain: str, user_id: int) -> bool:
 
 async def dequeue_shop_sync(timeout: int = 5) -> Optional[Dict[str, Any]]:
     """
-    Отримує завдання з черги за допомогою блокуючого витягування (BRPOP).
+    Отримує завдання з черги за допомогою атомарного перенесення (BRPOPLPUSH)
+    у чергу обробки (processing), що гарантує збереження задачі при падінні воркера.
     """
     client = await get_redis()
     if not client:
         return None
     
     try:
-        result = await client.brpop(QUEUE_NAME, timeout=timeout)
-        if result:
-            _, raw_data = result
-            return json.loads(raw_data)
+        # Атомарно витягуємо з основної черги і кидаємо в processing
+        raw_data = await client.brpoplpush(QUEUE_NAME, PROCESSING_QUEUE_NAME, timeout=timeout)
+        if raw_data:
+            # Зберігаємо сирий рядок усередині словника для подальшого ACK
+            task = json.loads(raw_data)
+            task["_raw_payload"] = raw_data
+            return task
         return None
     except Exception as e:
         logger.warning(f"⚠️ [Queue] Тимчасовий збій при читанні черги з Redis: {e}")
         return None
+
+
+async def ack_shop_sync(task: Dict[str, Any]) -> bool:
+    """
+    Підтвердження успішного виконання завдання (ACK) — видаляє його
+    з черги обробки (processing).
+    """
+    client = await get_redis()
+    if not client or "_raw_payload" not in task:
+        return False
+    
+    try:
+        raw_data = task["_raw_payload"]
+        # Видаляємо рівно 1 входження з processing queue
+        await client.lrem(PROCESSING_QUEUE_NAME, 1, raw_data)
+        logger.info(f"✅ [Queue] Завдання для магазину {task.get('shop')} успішно підтверджено (ACK).")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [Queue] Помилка підтвердження (ACK) для завдання: {e}")
+        return False

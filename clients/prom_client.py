@@ -12,20 +12,39 @@ class PromClient(BaseMarketplaceClient):
 
         url = "https://my.prom.ua/api/v1/orders/list"
         headers = {"Authorization": f"Bearer {token}"}
-        params = {}
-        if self.last_synced_at:
-            params["updated_at_min"] = self.last_synced_at
         
+        all_orders = []
+        page = 1
+        limit = 50
+
         try:
-            response = await self._make_request("GET", url, headers=headers, params=params)
-            
-            if response.status_code in [401, 403]:
-                raise OrderAPIError("Токен доступу до Prom застарів або недійсний.", response.status_code)
-            if response.status_code != 200:
-                raise OrderAPIError(f"Prom API повернув помилку: код {response.status_code}", response.status_code)
+            while True:
+                params = {"page": page, "limit": limit}
+                if self.last_synced_at:
+                    params["updated_at_min"] = self.last_synced_at
                 
-            data = response.json()
-            return data.get("orders", []) if isinstance(data, dict) else []
+                response = await self._make_request("GET", url, headers=headers, params=params)
+                
+                if response.status_code in [401, 403]:
+                    raise OrderAPIError("Токен доступу до Prom застарів або недійсний.", response.status_code)
+                if response.status_code != 200:
+                    raise OrderAPIError(f"Prom API повернув помилку: код {response.status_code}", response.status_code)
+                    
+                data = response.json()
+                orders = data.get("orders", []) if isinstance(data, dict) else []
+                
+                if not orders:
+                    break
+                    
+                all_orders.extend(orders)
+                
+                # Якщо замовлень повернулось менше ліміту — це була остання сторінка
+                if len(orders) < limit:
+                    break
+                    
+                page += 1
+
+            return all_orders
             
         except OrderAPIError:
             raise

@@ -89,8 +89,7 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
     rates_info = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as httpx_client:
-            response = await httpx_client.get("[https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json](https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json)")
-            
+            response = await httpx_client.get("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json")
             if response.status_code == 200:
                 data = response.json()
                 for item in data:
