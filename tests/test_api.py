@@ -1,3 +1,11 @@
+import sys
+import asyncio
+import uuid
+
+# Налаштування політики циклу подій для запобігання конфліктам на Windows
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -5,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from server import app
 from database import Base, get_db
 
-# Використовуємо ізольовану SQLite БД в пам'яті для миттєвих тестів
+# Використовуємо ізольовану SQLite БД в пам'яті для міттєвих тестів
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
@@ -38,9 +46,12 @@ async def test_root_endpoint(async_client):
 
 @pytest.mark.asyncio
 async def test_user_registration_and_login(async_client):
+    # Генеруємо унікальний email для кожного запуску тесту, щоб уникнути конфлікту дублікатів
+    unique_email = f"test_{uuid.uuid4().hex[:8]}@omniflow.io"
+    
     # Тест реєстрації
     reg_response = await async_client.post("/api/auth/register", json={
-        "email": "test@omniflow.io",
+        "email": unique_email,
         "password": "SecurePassword123!"
     })
     assert reg_response.status_code == 200
@@ -48,9 +59,9 @@ async def test_user_registration_and_login(async_client):
     assert data["success"] is True
     assert "token" in data
 
-    # Тест входу (логіну)
+    # Тест входу (логіну) з тими ж даними
     login_response = await async_client.post("/api/auth/login", json={
-        "email": "test@omniflow.io",
+        "email": unique_email,
         "password": "SecurePassword123!"
     })
     assert login_response.status_code == 200

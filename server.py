@@ -280,8 +280,36 @@ class PushTokenSchema(BaseModel):
     push_token: str
 
 
+# --- СХЕМИ ВІДПОВІДЕЙ (Swagger / OpenAPI) ---
+class AuthUserOut(BaseModel):
+    id: int
+    email: str
+
+class AuthResponse(BaseModel):
+    success: bool
+    token: str
+    user: AuthUserOut
+
+class OrdersResponse(BaseModel):
+    success: bool
+    shop: Optional[str] = None
+    orders: List[Dict[str, Any]] = []
+    token_expired: Optional[bool] = None
+    error: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    success: bool
+    reply: str
+    mode: str
+    info: Optional[str] = None
+
+class StandardStatusResponse(BaseModel):
+    success: bool
+    message: Optional[str] = None
+
+
 # --- АВТОРИЗАЦІЯ КОРИСТУВАЧІВ ---
-@app.post("/api/auth/register")
+@app.post("/api/auth/register", response_model=AuthResponse, tags=["Auth"])
 async def register(payload: UserRegisterSchema, request: Request):
     client_ip = request.client.host if request.client else "127.0.0.1"
     if not await check_rate_limit(f"reg:{client_ip}", max_requests=5, window_seconds=60):
@@ -301,7 +329,7 @@ async def register(payload: UserRegisterSchema, request: Request):
         return {"success": True, "token": token, "user": {"id": new_user.id, "email": new_user.email}}
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", response_model=AuthResponse, tags=["Auth"])
 async def login(payload: UserLoginSchema, request: Request):
     client_ip = request.client.host if request.client else "127.0.0.1"
     if not await check_rate_limit(f"login:{client_ip}", max_requests=10, window_seconds=60):
@@ -320,12 +348,12 @@ async def login(payload: UserLoginSchema, request: Request):
 
 # --- МАРШРУТИ API ---
 
-@app.get("/")
+@app.get("/", tags=["System"])
 async def root():
     return {"message": f"OmniFlow Enterprise SaaS Backend is running! (v: {BACKEND_VERSION}) 🚀"}
 
 
-@app.post("/api/orders")
+@app.post("/api/orders", response_model=OrdersResponse, tags=["Orders"])
 async def get_orders(payload: CredentialsSchema, request: Request, user_id: int = Depends(get_current_user_id)):
     if not await check_rate_limit(f"user:{user_id}:orders", max_requests=30):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів.")
@@ -363,7 +391,7 @@ async def get_orders(payload: CredentialsSchema, request: Request, user_id: int 
         return {"success": False, "token_expired": True, "error": "Помилка авторизації або з'єднання з магазином."}
 
 
-@app.post("/api/orders/multi")
+@app.post("/api/orders/multi", tags=["Orders"])
 async def get_orders_multi(payload: MultiStoreSchema, request: Request, user_id: int = Depends(get_current_user_id)):
     if not await check_rate_limit(f"user:{user_id}:multi", max_requests=15):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів для мультизбору.")
@@ -375,7 +403,7 @@ async def get_orders_multi(payload: MultiStoreSchema, request: Request, user_id:
     return {"success": True, "orders": all_orders}
 
 
-@app.post("/api/tracking")
+@app.post("/api/tracking", tags=["Logistics"])
 async def track_order_parcel(payload: TrackingSchema, user_id: int = Depends(get_current_user_id)):
     ttn = payload.trackingNumber.strip()
     carrier = payload.carrier.strip() if payload.carrier else "Нова Пошта"
@@ -388,7 +416,7 @@ async def track_order_parcel(payload: TrackingSchema, user_id: int = Depends(get
     return await get_nova_poshta_tracking(ttn)
 
 
-@app.post("/api/webhook/{platform}")
+@app.post("/api/webhook/{platform}", tags=["Webhooks"])
 async def receive_marketplace_webhook(platform: str, request: Request, x_webhook_signature: Optional[str] = Header(None)):
     body_bytes = await request.body()
     
@@ -419,7 +447,7 @@ async def receive_marketplace_webhook(platform: str, request: Request, x_webhook
         raise HTTPException(status_code=400, detail="Невірний формат вебхука.")
 
 
-@app.post("/api/process-ai")
+@app.post("/api/process-ai", tags=["AI & Chat"])
 async def process_ai(payload: ProcessAISchema, request: Request, user_id: int = Depends(get_current_user_id)):
     if not await check_rate_limit(f"user:{user_id}:ai", max_requests=20):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів до ШІ.")
@@ -431,7 +459,7 @@ async def process_ai(payload: ProcessAISchema, request: Request, user_id: int = 
     return {"success": True, "ai_report": ai_report}
 
 
-@app.post("/api/chat")
+@app.post("/api/chat", response_model=ChatResponse, tags=["AI & Chat"])
 async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Depends(get_current_user_id)):
     if not await check_rate_limit(f"user:{user_id}:chat", max_requests=30):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів до чату.")
@@ -453,7 +481,7 @@ async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Dep
     return {"success": True, "reply": ai_reply, "mode": "ai"}
 
 
-@app.post("/api/chat/mode")
+@app.post("/api/chat/mode", tags=["AI & Chat"])
 async def set_chat_mode(payload: ChatModeSchema, user_id: int = Depends(get_current_user_id)):
     if payload.mode not in ["ai", "manual"]:
         raise HTTPException(status_code=400, detail="Некоректний режим.")
@@ -472,7 +500,7 @@ async def set_chat_mode(payload: ChatModeSchema, user_id: int = Depends(get_curr
     return {"success": True, "chat_id": payload.chat_id, "mode": payload.mode}
 
 
-@app.post("/api/support")
+@app.post("/api/support", tags=["Support"])
 async def support_and_returns(payload: SupportSchema, request: Request, user_id: int = Depends(get_current_user_id)):
     if not await check_rate_limit(f"user:{user_id}:support", max_requests=20):
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів.")
@@ -485,7 +513,7 @@ async def support_and_returns(payload: SupportSchema, request: Request, user_id:
     return {"success": True, "support_report": support_analysis}
 
 
-@app.post("/api/notifications/register")
+@app.post("/api/notifications/register", response_model=StandardStatusResponse, tags=["Notifications"])
 async def register_push_token(payload: PushTokenSchema, user_id: int = Depends(get_current_user_id)):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(PushTokenModel).where(PushTokenModel.token == payload.push_token))
