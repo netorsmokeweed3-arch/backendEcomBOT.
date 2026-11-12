@@ -12,19 +12,21 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 async def get_redis_cache() -> Optional[aioredis.Redis]:
-    """Підключається до Redis для кешування відповідей ШІ з безпечними таймаутами."""
+    """Безпечно підключається до Redis з перевіркою пінгу, щоб уникнути тайм-аутів на запитах."""
     if not REDIS_URL:
         return None
     try:
-        return aioredis.from_url(
+        client = aioredis.from_url(
             REDIS_URL, 
             decode_responses=True,
-            socket_timeout=5.0,
-            socket_connect_timeout=5.0,
-            health_check_interval=30
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0
         )
+        # Одразу перевіряємо чи живий зв'язок
+        await client.ping()
+        return client
     except Exception as e:
-        logger.warning(f"Не вдалося підключитися до Redis: {e}")
+        logger.warning(f"Redis недоступний (працюємо без кешу): {e}")
         return None
 
 
