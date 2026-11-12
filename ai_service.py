@@ -12,21 +12,22 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 async def get_redis_cache() -> Optional[aioredis.Redis]:
-    """Безпечно підключається до Redis з перевіркою пінгу, щоб уникнути тайм-аутів на запитах."""
+    """Надійне підключення до Redis для ідемпотентності та кешу з автоповтором та більшими таймаутами."""
     if not REDIS_URL:
         return None
     try:
         client = aioredis.from_url(
             REDIS_URL, 
             decode_responses=True,
-            socket_timeout=2.0,
-            socket_connect_timeout=2.0
+            socket_timeout=10.0,          # Даємо хмарі більше часу на відповідь
+            socket_connect_timeout=10.0,  # Таймаут на з'єднання
+            retry_on_timeout=True,        # Автоматично повторювати спробу при мікро-таймаутах
+            health_check_interval=20      # Регулярно перевіряти статус з'єднання
         )
-        # Одразу перевіряємо чи живий зв'язок
         await client.ping()
         return client
     except Exception as e:
-        logger.warning(f"Redis недоступний (працюємо без кешу): {e}")
+        logger.warning(f"Redis тимчасово недоступний: {e}")
         return None
 
 
@@ -202,7 +203,7 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
                     fill_missing_fields(report, parsed_data)
 
             extracted = await MultiAgentSystem.run_analytics_agent(order, chat_messages)
-            fill_missing_fields(report, extracted)
+            fill_main_extracted = fill_missing_fields(report, extracted)
             
             summary = extracted.get("ai_summary")
             report["ai_summary"] = " ".join(summary.split()) if isinstance(summary, str) else ""
