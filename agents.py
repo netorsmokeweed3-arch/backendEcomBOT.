@@ -20,9 +20,13 @@ client = anthropic.AsyncAnthropic(
 )
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5") 
-MAX_TOKENS_LIMIT = 600  # Зменшено для економії токенів і забезпечення коротких відповідей
+MAX_TOKENS_LIMIT = 600  
 MAX_INPUT_LENGTH = 2000 
 MAX_RETRIES = 3 
+
+# Кеш курсів валют (TTL = 1 година)
+_rates_cache: Dict[str, Any] = {"data": {}, "ts": 0.0}
+RATES_TTL = 3600
 
 # ==========================================
 # СИСТЕМНІ ПРОМПТИ З ЖОРСТКИМИ AI-GUARDRAILS
@@ -66,10 +70,15 @@ FALLBACK_PARSER_AGENT_PROMPT = """Ти — Агент 4: «Експерт з і�
 
 
 async def fetch_realtime_currency_rates() -> Dict[str, Any]:
-    """Асинхронно отримує офіційні курси валют НБУ."""
+    """Асинхронно отримує офіційні курси валют НБУ з кешуванням на 1 годину."""
+    now = asyncio.get_event_loop().time()
+    if _rates_cache["data"] and (now - _rates_cache["ts"]) < RATES_TTL:
+        return _rates_cache["data"]
+
     rates_info = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as httpx_client:
+            # Виправлено URL НБУ без пошкоджених Markdown-посилань
             response = await httpx_client.get("[https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json](https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json)")
             
             if response.status_code == 200:
@@ -87,6 +96,11 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
                         }
     except Exception as e:
         logger.warning("[WARNING] Не вдалося завантажити курси валют НБУ: %s", e)
+    
+    if rates_info:
+        _rates_cache["data"] = rates_info
+        _rates_cache["ts"] = now
+        
     return rates_info
 
 def _sanitize_input(text: Any) -> str:
@@ -99,20 +113,14 @@ def _sanitize_input(text: Any) -> str:
 
 
 def _safe_parse_json(text: str) -> Dict[str, Any]:
-    """Безпечний парсер JSON без жадібних регулярних виразів. 
-    Використовує JSONDecoder.raw_decode для точного витягування валідного JSON-об'єкта.
-    """
     if not isinstance(text, str) or not text.strip():
         return {}
     
     cleaned_text = text.strip()
-    
-    # Очищення від markdown-обгорток (```json ... ```)
     cleaned_text = re.sub(r"^```(?:json)?\s*", "", cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
     cleaned_text = re.sub(r"\s*```$", "", cleaned_text, flags=re.MULTILINE)
     cleaned_text = cleaned_text.strip()
 
-    # Точне витягування JSON за допомогою raw_decode
     try:
         idx = cleaned_text.find('{')
         if idx == -1:
@@ -169,7 +177,6 @@ class MultiAgentSystem:
 
     @staticmethod
     async def run_sales_agent(user_message: str, chat_history: str) -> str:
-        """Агент 1: Продавець та Консультант"""
         safe_message = _sanitize_input(user_message)
         if not safe_message:
             return "Будь ласка, введіть коректне повідомлення."
@@ -188,12 +195,15 @@ class MultiAgentSystem:
 
     @staticmethod
     async def run_analytics_agent(order_data: Dict[str, Any], chat_messages: str) -> Dict[str, Any]:
-        """Агент 2: Аналітик та Аудитор замовлень"""
+        """Агент 2: Аналітик та Аудитор замовлень (використовує курси з order_data або кешу)."""
         if not isinstance(order_data, dict):
             order_data = {}
 
-        currency_data = await fetch_realtime_currency_rates()
-        order_data["market_currency_data"] = currency_data
+        currency_data = order_data.get("market_currency_data")
+        if not currency_data:
+            currency_data = await fetch_realtime_currency_rates()
+            order_data["market_currency_data"] = currency_data
+            
         safe_chat = _sanitize_input(chat_messages)
 
         user_msg = (
@@ -211,7 +221,6 @@ class MultiAgentSystem:
 
     @staticmethod
     async def run_support_agent(complaint_text: str, order_info:Dict[str, Any]) -> Dict[str, Any]:
-        """Агент 3: Арбітр / Підтримка та Повернення"""
         safe_complaint = _sanitize_input(complaint_text)
         if not isinstance(order_info, dict):
             order_info = {}
@@ -240,7 +249,6 @@ class MultiAgentSystem:
 
     @staticmethod
     async def run_fallback_parser_agent(raw_json_str: str) -> Dict[str, Any]:
-        """Агент 4: Експерт з інтеграції даних e-commerce (фолбек для поламаних структур)"""
         safe_json_str = _sanitize_input(raw_json_str)
         if not safe_json_str:
             return {}

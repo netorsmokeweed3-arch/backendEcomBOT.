@@ -7,18 +7,20 @@
 import os
 import logging
 import asyncio
-import json
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
-import redis.asyncio as aioredis
 
-from database import AsyncSessionLocal, PushTokenModel
+from database import AsyncSessionLocal, PushTokenModel, StoreCredentialModel, AuditLogModel
+from redis_pool import get_redis
+from clients.dispatcher import MarketplaceDispatcher
+from worker_queue import dequeue_shop_sync
+from order_normalizer import OrderAPIError
 
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
-REDIS_URL = os.getenv("REDIS_URL", "")
+dispatcher = MarketplaceDispatcher(max_concurrent=5)
 
 
 async def acquire_distributed_lock(lock_key: str, expire_seconds: int = 300) -> bool:
@@ -26,115 +28,132 @@ async def acquire_distributed_lock(lock_key: str, expire_seconds: int = 300) -> 
     Створює розподілене блокування в Redis (nx=True), щоб задачу виконав 
     тільки один інстанс бекенду серед багатьох задеплоєних копій.
     """
-    if not REDIS_URL:
+    redis = await get_redis()
+    if not redis:
         return True
     
     try:
-        async with aioredis.from_url(REDIS_URL, decode_responses=True) as client:
-            acquired = await client.set(lock_key, "locked", nx=True, ex=expire_seconds)
-            return bool(acquired)
+        acquired = await redis.set(lock_key, "locked", nx=True, ex=expire_seconds)
+        return bool(acquired)
     except Exception as e:
         logger.warning(f"Не вдалося отримати розподілений блок у Redis ({lock_key}): {e}")
         return True
 
 
-async def send_push_notification(title: str, body: str, data: dict = None) -> None:
+async def send_push_notification(title: str, body: str, data: dict = None, user_id: int = None) -> None:
     """
-    Повністю асинхронна відправка Push-сповіщень через httpx.AsyncClient.
-    Бере актуальні токени напряму з бази даних.
+    Повністю асинхронна відправка Push-сповіщень через httpx.AsyncClient батчами по 100 шт.
     """
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(PushTokenModel))
+            query = select(PushTokenModel)
+            if user_id is not None:
+                query = query.where(PushTokenModel.user_id == user_id)
+            result = await session.execute(query)
             tokens_records = result.scalars().all()
             tokens = [record.token for record in tokens_records if record.token]
 
-        if not tokens:
-            logger.info("Немає зареєстрованих Push-токенів у базі даних для відправки.")
+        valid_tokens = [t for t in tokens if t.startswith("ExponentPushToken")]
+        if not valid_tokens:
+            logger.info("Немає зареєстрованих валідних Push-токенів для відправки.")
             return
 
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            for token in tokens:
-                if not token.startswith("ExponentPushToken") and not token.startswith("ExpoPushtoken"):
-                    continue
-
-                message = {
-                    "to": token,
-                    "sound": "default",
-                    "title": title,
-                    "body": body,
-                    "data": data or {},
-                }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for i in range(0, len(valid_tokens), 100):
+                batch = [
+                    {
+                        "to": token,
+                        "sound": "default",
+                        "title": title,
+                        "body": body,
+                        "data": data or {},
+                    }
+                    for token in valid_tokens[i:i + 100]
+                ]
 
                 try:
-                    response = await client.post(EXPO_PUSH_URL, json=message)
-                    logger.info(f"Push відправлено на {token}: статус {response.status_code}")
+                    response = await client.post(EXPO_PUSH_URL, json=batch)
+                    logger.info(f"Push-батч ({len(batch)} шт.) відправлено: статус {response.status_code}")
                 except httpx.TimeoutException:
-                    logger.error(f"Таймаут при відправці Push-повідомлення на {token}")
+                    logger.error("Таймаут при відправці Push-батчу")
                 except Exception as e:
-                    logger.error(f"Помилка відправки Push-повідомлення на {token}: {str(e)}")
+                    logger.error(f"Помилка відправки Push-батчу: {str(e)}")
                     
     except Exception as e:
         logger.error(f"Помилка при читанні Push-токенів з бази даних: {str(e)}")
 
 
-async def enqueue_shop_sync(shop_domain: str, user_id: int) -> None:
-    """
-    Додає завдання на фонову синхронізацію магазину в чергу Redis Lists.
-    Використовується у FastAPI ендпоінтах для миттєвої відповіді клієнту.
-    """
-    if not REDIS_URL:
-        logger.warning("Redis не налаштовано. Завдання синхронізації неможливо поставити в чергу.")
-        return
-    
-    try:
-        async with aioredis.from_url(REDIS_URL, decode_responses=True) as client:
-            task_data = json.dumps({
-                "shop": shop_domain, 
-                "user_id": user_id, 
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            await client.lpush("queue:shop_sync", task_data)
-            logger.info(f"📥 Магазин {shop_domain} успішно додано до черги фонової синхронізації.")
-    except Exception as e:
-        logger.error(f"Помилка додавання в чергу sync для {shop_domain}: {e}")
-
-
 async def process_shop_sync_queue() -> None:
     """
-    Фоновий воркер, який постійно слухає чергу sync-завдань із Redis за допомогою BRPOP.
-    Забезпечує розподілене виконання важких запитів до маркетплейсів.
+    Фоновий воркер, який постійно слухає чергу sync-завдань із Redis за допомогою BRPOP
+    та виконує реальну синхронізацію магазину.
     """
-    if not REDIS_URL:
+    redis = await get_redis()
+    if not redis:
         return
 
     logger.info("🔄 Слухач черги синхронізації магазинів (Shop Sync Queue) запущено!")
     
     while True:
         try:
-            async with aioredis.from_url(REDIS_URL, decode_responses=True) as client:
-                # BRPOP блокує потік до появи нового завдання (ефективно, 0% навантаження на CPU в простеньких циклах)
-                result = await client.brpop("queue:shop_sync", timeout=5)
-                if result:
-                    _, raw_data = result
-                    task = json.loads(raw_data)
-                    shop = task.get("shop")
-                    user_id = task.get("user_id")
-                    
-                    logger.info(f"⚙️ Воркер почав обробку синхронізації для магазину: {shop} (Користувач ID: {user_id})")
-                    
-                    try:
-                        # Тут виконується запит через твій MarketplaceDispatcher або клієнт магазину
-                        await asyncio.sleep(1)  # Імітація запиту до зовнішнього API маркетплейсу
-                        logger.info(f"✅ Фонова синхронізація магазину {shop} успішно завершена!")
-                    except Exception as exc:
-                        logger.error(f"❌ Помилка фонової синхронізації для {shop}: {exc}")
+            task = await dequeue_shop_sync(timeout=5)
+            if task:
+                shop = task.get("shop")
+                user_id = task.get("user_id")
+                
+                logger.info(f"⚙️ Воркер почав обробку синхронізації для магазину: {shop} (Користувач ID: {user_id})")
+                
+                try:
+                    async with AsyncSessionLocal() as db:
+                        result = await db.execute(select(StoreCredentialModel).where(
+                            StoreCredentialModel.shop_domain == shop,
+                            StoreCredentialModel.user_id == user_id
+                        ))
+                        store_cred = result.scalars().first()
                         
+                        if not store_cred:
+                            logger.error(f"❌ Магазин {shop} не знайдено для користувача {user_id}")
+                            continue
+                        
+                        import json as jsonlib
+                        from database import decrypt_credential
+                        credentials = jsonlib.loads(decrypt_credential(store_cred.encrypted_credentials))
+                        
+                        store_config = {
+                            "platform": store_cred.platform,
+                            "shop": shop,
+                            "credentials": credentials
+                        }
+                        
+                        orders = await dispatcher.fetch_store_orders(store_config)
+                        logger.info(f"✅ Фонова синхронізація магазину {shop} успішно завершена! Завантажено замовлень: {len(orders)}")
+                        
+                        # Логування успіху в аудит
+                        db.add(AuditLogModel(
+                            user_id=user_id,
+                            shop_domain=shop,
+                            event_type="BACKGROUND_SYNC_SUCCESS",
+                            message=f"Успішно синхронізовано. Замовлень: {len(orders)}"
+                        ))
+                        await db.commit()
+                        
+                except OrderAPIError as oae:
+                    logger.error(f"❌ API помилка синхронізації для {shop}: {oae}")
+                    async with AsyncSessionLocal() as db:
+                        db.add(AuditLogModel(
+                            user_id=user_id,
+                            shop_domain=shop,
+                            event_type="BACKGROUND_SYNC_ERROR",
+                            message=str(oae)
+                        ))
+                        await db.commit()
+                except Exception as exc:
+                    logger.error(f"❌ Критична помилка фонової синхронізації для {shop}: {exc}")
+                    
         except asyncio.CancelledError:
             break
         except Exception as e:
-        # Безпечне логування з'єднання Redis у фоні
-            logger.warning(f"Тимчасовий збій підключення до Redis у черзі воркера: {e}")
+            logger.warning(f"Тимчасовий збій у черзі воркера: {e}")
             await asyncio.sleep(3)
 
 
@@ -145,7 +164,6 @@ async def background_store_monitor() -> None:
     """
     logger.info("Фоновий монітор магазинів запущено з підтримкою Distributed Lock! 🚀")
     
-    # Запускаємо паралельно слухач черги синхронізації магазинів
     sync_queue_task = asyncio.create_task(process_shop_sync_queue())
 
     last_morning_report_day = None
@@ -154,12 +172,12 @@ async def background_store_monitor() -> None:
     try:
         while True:
             try:
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 current_hour = now.hour
                 current_minute = now.minute
                 current_date = now.date()
 
-                # --- 1. РАНКОВИЙ ЗВІТ (О 8:00 ранку) ---
+                # --- 1. РАНКОВИЙ ЗВІТ (О 8:00 UTC) ---
                 if current_hour == 8 and current_minute == 0 and last_morning_report_day != current_date:
                     lock_key = f"lock:morning_report:{current_date}"
                     
@@ -173,7 +191,7 @@ async def background_store_monitor() -> None:
                     else:
                         logger.info("Ранковий звіт вже виконується іншим інстансом сервера. Пропускаємо.")
 
-                # --- 2. ВЕЧІРНІЙ ЗВІТ (О 21:00) ---
+                # --- 2. ВЕЧІРНІЙ ЗВІТ (О 21:00 UTC) ---
                 if current_hour == 21 and current_minute == 0 and last_evening_report_day != current_date:
                     lock_key = f"lock:evening_report:{current_date}"
                     

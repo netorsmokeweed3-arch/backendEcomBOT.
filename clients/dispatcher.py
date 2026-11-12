@@ -25,6 +25,7 @@ except ImportError:
 from clients.prom_client import PromClient
 from clients.rozetka_client import RozetkaClient
 from clients.woocommerce_client import WooCommerceClient
+from clients.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,11 @@ class MarketplaceDispatcher:
             return RozetkaClient(shop_domain, credentials)
         elif "woo" in p or "wordpress" in p:
             return WooCommerceClient(shop_domain, credentials)
+        elif "shopify" in p:
+            return ShopifyClient(shop_domain, credentials)
         
         logger.warning(f"Невідома платформа для клієнта: {platform}")
-        return None
+        raise OrderAPIError(f"Платформа «{platform}» поки не підтримується. Доступні: prom, rozetka, woocommerce, shopify.", 400)
 
     async def fetch_store_orders(self, store_config: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Безпечний збір замовлень з одного магазину під контролем семафора."""
@@ -53,8 +56,6 @@ class MarketplaceDispatcher:
         credentials = store_config.get("credentials", {})
 
         client = self._get_client(platform, shop_domain, credentials)
-        if not client:
-            return []
 
         async with self.semaphore:
             try:
@@ -68,7 +69,7 @@ class MarketplaceDispatcher:
                 ]
                 return normalized
             except OrderAPIError:
-                # Прокидаємо помилки API (наприклад, 401 Unauthorized) далі до server.py для аудиту
+                # Прокидаємо помилки API (наприклад, 401 Unauthorized або 400) далі до server.py для аудиту
                 raise
             except Exception as e:
                 logger.error(f"Помилка збору замовлень з магазину {shop_domain}: {str(e)}")

@@ -1,5 +1,6 @@
 """Базовий абстрактний клас клієнта маркетплейсу (Enterprise Edition).
-Забезпечує єдиний інтерфейс, таймаути, ретраї та уніфіковану обробку помилок.
+Забезпечує єдиний інтерфейс, таймаути, ретраї, уніфіковану обробку помилок
+та вбудований захист від SSRF (Server-Side Request Forgery).
 """
 
 import abc
@@ -7,6 +8,9 @@ import logging
 import httpx
 import asyncio
 import random
+import ipaddress
+import socket
+from urllib.parse import urlparse
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -28,8 +32,45 @@ class BaseMarketplaceClient(abc.ABC):
         """Асинхронний метод для отримання сирих замовлень з маркетплейсу."""
         pass
 
+    def _validate_url_ssrf(self, target_url: str) -> None:
+        """Перевіряє URL на предмет SSRF (запобігає запитам на локалхост, приватні IP та метадані хмар)."""
+        try:
+            parsed = urlparse(target_url)
+            hostname = parsed.hostname
+            if not hostname:
+                raise OrderAPIError("Некоректний домен або URL для запиту.", 400)
+
+            # Перевірка на заборонені ключові слова
+            forbidden_keywords = ["localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"]
+            if any(fk in hostname.lower() for fk in forbidden_keywords):
+                logger.warning(f"Заблоковано потенційну SSRF-атаку на хост: {hostname}")
+                raise OrderAPIError("Заборонено здійснювати запити на внутрішні або системні адреси.", 403)
+
+            # Резолвимо домен в IP-адресу для перевірки діапазонів
+            ip_str = socket.gethostbyname(hostname)
+            ip_obj = ipaddress.ip_address(ip_str)
+
+            # Перевірка на приватні, локальні або зарезервовані IP-мережі
+            if (ip_obj.is_private or 
+                ip_obj.is_loopback or 
+                ip_obj.is_link_local or 
+                ip_obj.is_reserved or 
+                ip_obj.is_multicast):
+                logger.warning(f"Заблоковано спробу SSRF на приватну/зарезервовану IP-адресу: {ip_str} ({hostname})")
+                raise OrderAPIError("Доступ до приватних або локальних мереж заборонено.", 403)
+
+        except socket.gaierror as err:
+            raise OrderAPIError(f"Не вдалося резолвити домен: {hostname}", 400) from err
+        except OrderAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Помилка валідації SSRF для URL {target_url}: {e}")
+            raise OrderAPIError("Помилка безпеки при перевірці домену.", 400)
+
     async def _make_request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Захищений асинхронний запит із повторними спробами (Retry) та обробкою таймаутів."""
+        """Захищений асинхронний запит із перевіркою SSRF, ретраями та обробкою таймаутів."""
+        self._validate_url_ssrf(url)
+
         retry_delay = 1.0
         for attempt in range(1, self.max_retries + 1):
             try:

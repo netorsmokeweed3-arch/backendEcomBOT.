@@ -1,17 +1,17 @@
 """Модуль бази даних для SaaS-платформи (OmniFlow Enterprise - Multi-Tenancy & Audit Logs).
-Асинхронний SQLAlchemy рушій із підтримкою користувачів, ізоляцією даних, WAL-режимом
-та вбудованим шифруванням чутливих даних у спокої (Encryption at Rest).
+Асинхронний SQLAlchemy рушій із підтримкою користувачів, ізоляцією даних, WAL-режимом,
+персистентністю замовлень, інкрементальною міткою та шифруванням у спокої (Encryption at Rest).
 """
 
 import os
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, event, select, ForeignKey, DateTime
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import String, Text, Float, event, select, ForeignKey, DateTime, PrimaryKeyConstraint
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 from cryptography.fernet import Fernet
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,12 @@ def decrypt_credential(encrypted_text: str) -> str:
         raise
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ecom_database.db")
+
+# Авто-виправлення схеми для async-драйвера (захист від збоїв на старті)
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
 engine_args = {
     "echo": False,
@@ -88,13 +94,20 @@ class UserModel(Base):
 class PushTokenModel(Base):
     __tablename__ = "push_tokens"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     token: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
 
 
 class ChatModeModel(Base):
+    """Модель режимів чату зі складовим первинним ключем для запобігання tenant-колізіям."""
     __tablename__ = "chat_modes"
-    chat_id: Mapped[str] = mapped_column(String(100), primary_key=True, index=True)
+    chat_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="ai", nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("chat_id", "user_id"),
+    )
 
 
 class StoreCredentialModel(Base):
@@ -102,8 +115,42 @@ class StoreCredentialModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    platform: Mapped[str] = mapped_column(String(50), default="shopify", nullable=False)
+    platform: Mapped[str] = mapped_column(String(50), default="prom", nullable=False)
     encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)  # Мітка інкрементальної синхронізації
+
+
+class OrderModel(Base):
+    """Персистентна таблиця замовлень для кешування, аналітики та інкрементальної синхронізації."""
+    __tablename__ = "orders"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    shop_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    external_order_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    order_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    customer_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    phone: Mapped[str] = mapped_column(String(50), nullable=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=True)
+    total_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="UAH", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="В обробці", nullable=False)
+    raw_payload: Mapped[str] = mapped_column(Text, nullable=True)  # Повний JSON замовлення
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    items = relationship("OrderItemModel", back_populates="order", cascade="all, delete-orphan")
+
+
+class OrderItemModel(Base):
+    """Товари у складі замовлення."""
+    __tablename__ = "order_items"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True, nullable=False)
+    sku: Mapped[str] = mapped_column(String(100), index=True, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    unit_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    order = relationship("OrderModel", back_populates="items")
 
 
 class AuditLogModel(Base):
@@ -112,16 +159,21 @@ class AuditLogModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
-    event_type: Mapped[str] = mapped_column(String(50), nullable=False)  # напр. "SYNC_ERROR", "SUCCESS"
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+AUTO_CREATE_TABLES = os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true"
 
 async def init_db() -> None:
+    if not AUTO_CREATE_TABLES:
+        logger.info("AUTO_CREATE_TABLES=false: схему БД керує Alembic (alembic upgrade head).")
+        return
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Таблиці бази даних успішно ініціалізовано та перевірено.")
+        logger.info("Таблиці бази даних успішно ініціалізовано через create_all.")
     except Exception as e:
         logger.error(f"Критична помилка ініціалізації бази даних: {str(e)}", exc_info=True)
         raise
@@ -145,6 +197,4 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             logger.warning(f"Транзакцію скасовано через помилку (Rollback виконано): {str(e)}")
             raise
         finally:
-            await session.close()  
-
-
+            await session.close()

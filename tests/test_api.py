@@ -46,10 +46,8 @@ async def test_root_endpoint(async_client):
 
 @pytest.mark.asyncio
 async def test_user_registration_and_login(async_client):
-    # Генеруємо унікальний email для кожного запуску тесту, щоб уникнути конфлікту дублікатів
     unique_email = f"test_{uuid.uuid4().hex[:8]}@omniflow.io"
     
-    # Тест реєстрації
     reg_response = await async_client.post("/api/auth/register", json={
         "email": unique_email,
         "password": "SecurePassword123!"
@@ -59,7 +57,6 @@ async def test_user_registration_and_login(async_client):
     assert data["success"] is True
     assert "token" in data
 
-    # Тест входу (логіну) з тими ж даними
     login_response = await async_client.post("/api/auth/login", json={
         "email": unique_email,
         "password": "SecurePassword123!"
@@ -69,9 +66,30 @@ async def test_user_registration_and_login(async_client):
 
 @pytest.mark.asyncio
 async def test_protected_route_without_token(async_client):
-    # Перевірка захисту маршруту без Bearer токена (має повернути 401)
     response = await async_client.post("/api/orders", json={
         "shop": "myshop.prom.ua", 
         "token": "fake"
     })
     assert response.status_code == 401
+
+@pytest.mark.asyncio
+async def test_tenant_isolation_stores(async_client):
+    # Користувач А створює магазин
+    email_a = f"a_{uuid.uuid4().hex[:6]}@test.io"
+    reg_a = await async_client.post("/api/auth/register", json={"email": email_a, "password": "Password123!"})
+    token_a = reg_a.json()["token"]
+    
+    await async_client.post("/api/stores", json={
+        "shop": "shop-a.prom.ua", 
+        "platform": "prom", 
+        "token": "secret-token-a"
+    }, headers={"Authorization": f"Bearer {token_a}"})
+
+    # Користувач Б реєструється і перевіряє свої магазини (має бути порожньо, бо ізоляція)
+    email_b = f"b_{uuid.uuid4().hex[:6]}@test.io"
+    reg_b = await async_client.post("/api/auth/register", json={"email": email_b, "password": "Password123!"})
+    token_b = reg_b.json()["token"]
+    
+    stores_b = await async_client.get("/api/stores", headers={"Authorization": f"Bearer {token_b}"})
+    assert stores_b.status_code == 200
+    assert stores_b.json()["stores"] == []

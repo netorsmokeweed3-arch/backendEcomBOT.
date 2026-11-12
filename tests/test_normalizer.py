@@ -1,83 +1,57 @@
-import re
-from typing import Any, Dict, Optional, List
+"""Тести для перевірки реального модуля order_normalizer.py."""
 
-def normalize_shop(shop_url: Optional[str]) -> Optional[str]:
-    """Очищує та нормалізує домен магазину."""
-    if not shop_url or not isinstance(shop_url, str):
-        return None
-    cleaned = shop_url.strip().lower()
-    cleaned = re.sub(r"^https?://", "", cleaned)
-    cleaned = cleaned.split("/")[0]
-    return cleaned if cleaned else None
+import pytest
+from order_normalizer import normalize_shop, normalize_order, to_number, money
 
-def to_number(value: Any) -> Optional[float | int]:
-    """Безпечно конвертує вхідне значення у float/int, очищаючи пробіли та замінюючи кому на крапку."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = value.strip().replace(" ", "").replace(",", ".")
-        cleaned = re.sub(r"[^\d.-]", "", cleaned)
-        if not cleaned:
-            return None
-        try:
-            val = float(cleaned)
-            return int(val) if val.is_integer() else val
-        except ValueError:
-            return None
-    return None
 
-def money(amount: Any, currency: str = "UAH") -> Dict[str, Any]:
-    """Форматує грошову суму та валюту."""
-    num = to_number(amount) or 0.0
-    return {
-        "amount": num,
-        "currency": currency.upper(),
-        "formatted": f"{num:.2f} {currency.upper()}"
+def test_normalize_shop_strips_protocol():
+    assert normalize_shop("https://My-Shop.prom.ua/path") == "my-shop.prom.ua"
+    assert normalize_shop("") is None
+    assert normalize_shop(None) is None
+
+
+def test_normalize_order_shopify_structure():
+    raw = {
+        "id": 450789469, 
+        "order_number": 1001, 
+        "currency": "USD", 
+        "total_price": "749.95",
+        "customer": {
+            "first_name": "Andrii", 
+            "last_name": "Bolshakov", 
+            "email": "a@example.com"
+        },
+        "shipping_address": {
+            "address1": "Verbutskogo 15/11", 
+            "city": "Portland", 
+            "zip": "97201", 
+            "country": "United States"
+        },
+        "line_items": [
+            {
+                "id": 1, 
+                "title": "Desk Lamp", 
+                "sku": "LAMP-01", 
+                "quantity": 1, 
+                "price": "749.95"
+            }
+        ],
     }
+    result = normalize_order(raw, "test.myshopify.com")
+    assert result["customer_name"] == "Andrii Bolshakov"
+    assert result["total_amount"]["amount"] == 749.95
+    assert result["items"][0]["sku"] == "LAMP-01"
+    assert result["delivery_address"]["city"] == "Portland"
 
-def normalize_order(raw_order: Dict[str, Any], shop_domain: str) -> Dict[str, Any]:
-    """Нормалізує сирий об'єкт замовлення до єдиної внутрішньої структури."""
-    safe_order = raw_order if isinstance(raw_order, dict) else {}
-    
-    order_number = str(safe_order.get("order_id") or safe_order.get("id") or "")
-    total_price = to_number(safe_order.get("total_price") or safe_order.get("total") or 0) or 0.0
-    currency = str(safe_order.get("currency") or "UAH")
-    
-    customer = safe_order.get("customer") or {}
-    if isinstance(customer, dict):
-        first_name = str(customer.get("first_name", ""))
-        last_name = str(customer.get("last_name", ""))
-        customer_name = f"{first_name} {last_name}".strip()
-        email = str(customer.get("email", ""))
-    else:
-        customer_name = ""
-        email = ""
 
-    line_items = safe_order.get("line_items") or safe_order.get("items") or []
-    formatted_items = []
-    if isinstance(line_items, list):
-        for item in line_items:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("name") or item.get("title", ""))
-            qty = to_number(item.get("quantity") or item.get("qty") or 1) or 1
-            price = to_number(item.get("price") or item.get("unit_price") or 0) or 0.0
-            sku = str(item.get("sku", ""))
-            
-            formatted_items.append({
-                "title": title,
-                "quantity": qty,
-                "price": price,
-                "sku": sku
-            })
+def test_to_number_converts_correctly():
+    assert to_number(" 1,500.50 ") == 1500.50
+    assert to_number(100) == 100.0
+    assert to_number("invalid") is None
 
-    return {
-        "shop": normalize_shop(shop_domain),
-        "order_number": order_number,
-        "customer_name": customer_name,
-        "email": email,
-        "total_amount": money(total_price, currency),
-        "items": formatted_items
-    }
+
+def test_money_formatting():
+    res = money("500", "UAH")
+    assert res["amount"] == 500.0
+    assert res["currency"] == "UAH"
+    assert "500.00" in res["formatted"]

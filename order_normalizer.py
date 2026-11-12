@@ -1,30 +1,16 @@
 """Універсальний обробник замовлень для SaaS-платформи (Enterprise Edition).
 Містить повну базу ключів-синонімів для всіх магазинів і маркетплейсів,
-Pydantic-валідацію, асинхронний збір даних та захист від обривів мережі (Retry).
+Pydantic-валідацію та безпечну нормалізацію даних.
 """
 
-import os
 import re
-import asyncio
 import logging
 from functools import lru_cache
 from typing import Any, Optional, List, Dict
 from pydantic import BaseModel, Field, ValidationError, field_validator
-import httpx
-from cryptography.fernet import Fernet
 
 logger = logging.getLogger("omniflow_engine")
 logger.setLevel(logging.INFO)
-
-# --- ЗАХИСТ (Fail-Fast для Encryption Key) ---
-ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY")
-if not ENCRYPTION_KEY:
-    raise RuntimeError(
-        "КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: Змінна середовища APP_ENCRYPTION_KEY не задана! "
-        "Генерація випадкового ключа в рантаймі заборонена, щоб уникнути втрати доступу до токенів у БД."
-    )
-
-cipher_suite = Fernet(ENCRYPTION_KEY.encode("utf-8") if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
 
 # Безпечний кортеж порожніх значень для перевірок
 EMPTY = (None, "", (), {}, "None", "null", "N/A", "n/a")
@@ -422,132 +408,3 @@ def normalize_order(raw: dict, shop: str) -> dict:
     except ValidationError as ve:
         logger.error(f"Pydantic Validation Error for shop {shop}: {ve.errors()}")
         return base_dict
-
-
-def decrypt_token_ephemeral(encrypted_token: str) -> str:
-    """Розшифровує токен з використанням Fernet. 
-    При криптографічній помилці логує критичну проблему і кидає OrderAPIError замість маскування.
-    """
-    try:
-        decrypted_bytes = cipher_suite.decrypt(encrypted_token.encode('utf-8'))
-        return decrypted_bytes.decode('utf-8')
-    except Exception as e:
-        logger.critical(
-            f"КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: Не вдалося розшифрувати токен доступу. "
-            f"Ймовірно, було змінено APP_ENCRYPTION_KEY або дані пошкоджено. Деталі: {e}"
-        )
-        raise OrderAPIError("Помилка безпеки: неможливо розшифрувати дані авторизації магазину.", 500)
-
-
-async def fetch_woocommerce_orders(shop_url: str, enc_ck: str, enc_cs: str) -> list:
-    try:
-        consumer_key = decrypt_token_ephemeral(enc_ck)
-        consumer_secret = decrypt_token_ephemeral(enc_cs)
-    except OrderAPIError:
-        raise
-    except Exception as e:
-        logger.error(f"Неочікувана помилка розшифрування для {shop_url}: {e}")
-        raise OrderAPIError("Внутрішня помилка шифрування.", 500)
-
-    clean_url = shop_url.rstrip("/")
-    if not clean_url.startswith("http"):
-        clean_url = f"https://{clean_url}"
-        
-    url = f"{clean_url}/wp-json/wc/v3/orders"
-    
-    max_retries = 3
-    retry_delay = 1.5
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=25.0, auth=(consumer_key, consumer_secret)) as client:
-                response = await client.get(url)
-                
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    return data if isinstance(data, list) else []
-                except ValueError as error:
-                    raise OrderAPIError(f"Магазин WooCommerce «{shop_url}» повернув невалідний JSON.", 502) from error
-
-            if response.status_code >= 500 and attempt < max_retries:
-                logger.warning(f"WooCommerce {shop_url} відповів кодом {response.status_code}. Спроба {attempt}/{max_retries}...")
-                await asyncio.sleep(retry_delay)
-                continue
-
-            raise OrderAPIError(f"Помилка WooCommerce API для «{shop_url}»: код {response.status_code}.", response.status_code)
-
-        except (httpx.TimeoutException, httpx.RequestError) as error:
-            if attempt < max_retries:
-                logger.warning(f"Мережевий збій з WooCommerce {shop_url} (спроба {attempt}/{max_retries}). Повторюємо...")
-                await asyncio.sleep(retry_delay)
-                continue
-            if isinstance(error, httpx.TimeoutException):
-                raise OrderAPIError(f"Час очікування запиту до WooCommerce «{shop_url}» вичерпано.", 504) from error
-            raise OrderAPIError(f"Не вдалося підключитися до WooCommerce «{shop_url}».", 502) from error
-
-
-async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
-    """Сумісна обгортка для server.py із прокиданням OrderAPIError."""
-    clean_shop = normalize_shop(shop) or shop
-    if "woocommerce" in clean_shop.lower() or ":" in token:
-        parts = token.split(":", 1)
-        ck = parts[0].strip()
-        cs = parts[1].strip() if len(parts) > 1 else ""
-        return await fetch_woocommerce_orders(shop, ck, cs)
-    else:
-        try:
-            from clients.prom_client import PromClient
-            client = PromClient(shop, {"token": token})
-            return await client.fetch_orders()
-        except OrderAPIError:
-            raise
-        except Exception as e:
-            logger.error(f"Помилка fetch_orders для {shop}: {e}")
-            raise OrderAPIError(f"Помилка завантаження замовлень: {e}", 502)
-
-
-async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not isinstance(stores, list) or not stores:
-        return []
-
-    async def fetch_single_store(store_info: Dict[str, Any]) -> List[Dict[str, Any]]:
-        platform = store_info.get("platform", "woocommerce").lower()
-        shop_raw = store_info.get("shop") or store_info.get("shop_domain")
-        shop = normalize_shop(shop_raw) or shop_raw
-        credentials = store_info.get("credentials", {})
-        
-        try:
-            # Захист окремого магазину таймаутом у 30 секунд, щоб повільна мережа не блокувала все
-            async def _do_fetch():
-                raw_orders = []
-                if platform == "woocommerce" or "consumer_key" in credentials:
-                    ck = credentials.get("consumer_key", "")
-                    cs = credentials.get("consumer_secret", "")
-                    raw_orders = await fetch_woocommerce_orders(shop, ck, cs)
-                else:
-                    token = credentials.get("token", "")
-                    raw_orders = await fetch_orders(shop, token)
-                return raw_orders
-
-            raw_orders = await asyncio.wait_for(_do_fetch(), timeout=30.0)
-            return [normalize_order(raw_ord, shop) for raw_ord in raw_orders if isinstance(raw_ord, dict)]
-
-        except asyncio.TimeoutError:
-            logger.error(f"Таймаут (30с) при опитуванні магазину {shop}")
-            return []
-        except Exception as e:
-            logger.error(f"Failed to fetch orders for store {shop}: {str(e)}")
-            return []
-
-    tasks = [fetch_single_store(store) for store in stores]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    all_orders = []
-    for res in results:
-        if isinstance(res, list):
-            all_orders.extend(res)
-            
-    return all_orders
-
-
