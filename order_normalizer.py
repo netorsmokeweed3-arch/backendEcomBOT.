@@ -488,7 +488,7 @@ async def fetch_woocommerce_orders(shop_url: str, enc_ck: str, enc_cs: str) -> l
 
 
 async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) -> list:
-    """Сумісна обгортка для server.py, щоб імпорт fetch_orders працював безпомилково."""
+    """Сумісна обгортка для server.py із прокиданням OrderAPIError."""
     clean_shop = normalize_shop(shop) or shop
     if "woocommerce" in clean_shop.lower() or ":" in token:
         parts = token.split(":", 1)
@@ -500,9 +500,11 @@ async def fetch_orders(shop: str, token: str, orders_url: Optional[str] = None) 
             from clients.prom_client import PromClient
             client = PromClient(shop, {"token": token})
             return await client.fetch_orders()
-        except ImportError:
-            # Fallback якщо кастомний клієнт ще не ініціалізований
-            return []
+        except OrderAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Помилка fetch_orders для {shop}: {e}")
+            raise OrderAPIError(f"Помилка завантаження замовлень: {e}", 502)
 
 
 async def fetch_orders_multi(stores: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

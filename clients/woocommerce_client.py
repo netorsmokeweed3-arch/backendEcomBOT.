@@ -1,8 +1,8 @@
-"""Модуль інтеграції з WooCommerce API."""
+"""Модуль інтеграції з WooCommerce API (Enterprise Edition)."""
 
 import logging
 from typing import List, Dict, Any
-from clients.base_client import BaseMarketplaceClient
+from clients.base_client import BaseMarketplaceClient, OrderAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +10,9 @@ class WooCommerceClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
         ck = self.credentials.get("consumer_key", "")
         cs = self.credentials.get("consumer_secret", "")
+        
+        if not ck or not cs:
+            raise OrderAPIError("Відсутні Consumer Key або Consumer Secret для WooCommerce.", 400)
         
         clean_url = self.shop_domain
         if not clean_url.startswith("http"):
@@ -19,11 +22,22 @@ class WooCommerceClient(BaseMarketplaceClient):
         
         try:
             response = await self._make_request("GET", url, auth=(ck, cs))
-            if response.status_code == 200:
+            
+            if response.status_code in [401, 403]:
+                logger.warning(f"Помилка авторизації WooCommerce для магазину {self.shop_domain}")
+                raise OrderAPIError("Ключі доступу WooCommerce недійсні або застаріли.", response.status_code)
+                
+            if response.status_code != 200:
+                raise OrderAPIError(f"WooCommerce API повернув помилку: код {response.status_code}", response.status_code)
+                
+            try:
                 data = response.json()
                 return data if isinstance(data, list) else []
-            logger.error(f"WooCommerce {self.shop_domain} відповів кодом {response.status_code}")
-            return []
+            except ValueError as err:
+                raise OrderAPIError(f"Магазин WooCommerce «{self.shop_domain}» повернув невалідний JSON.", 502) from err
+                
+        except OrderAPIError:
+            raise
         except Exception as e:
             logger.error(f"Помилка запиту до WooCommerce {self.shop_domain}: {str(e)}")
-            return []
+            raise OrderAPIError(f"Не вдалося отримати замовлення з WooCommerce: {str(e)}", 502)

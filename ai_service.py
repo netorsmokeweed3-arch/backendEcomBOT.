@@ -1,9 +1,25 @@
 import json
 import logging
 import asyncio
+import hashlib
+import os
+from typing import Optional, Dict, Any
+import redis.asyncio as aioredis
 from agents import MultiAgentSystem, fetch_realtime_currency_rates
 
 logger = logging.getLogger(__name__)
+
+REDIS_URL = os.getenv("REDIS_URL", "")
+
+async def get_redis_cache() -> Optional[aioredis.Redis]:
+    """Підключається до Redis для кешування відповідей ШІ."""
+    if not REDIS_URL:
+        return None
+    try:
+        return aioredis.from_url(REDIS_URL, decode_responses=True)
+    except Exception:
+        return None
+
 
 def standard_fields(order: dict) -> dict:
     """Нормалізує базові поля замовлення у безпечний внутрішній формат."""
@@ -143,7 +159,22 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
 
 
 async def analyze_order(order: dict, chat_messages: str) -> dict:
-    """Головна точка входу: визначає контекст (чат чи замовлення) та спрямовує до агента."""
+    """Головна точка входу з інтегрованим Redis-кешуванням відповідей ШІ."""
+    
+    # Генеруємо унікальний хеш для поточного стану замовлення та чату
+    cache_payload = json.dumps({"order": order, "chat": chat_messages}, sort_keys=True, ensure_ascii=False)
+    cache_key = f"ai_cache:{hashlib.sha256(cache_payload.encode('utf-8')).hexdigest()}"
+    
+    redis = await get_redis_cache()
+    if redis:
+        try:
+            cached_result = await redis.get(cache_key)
+            if cached_result:
+                logger.info("⚡ Знайдено кешовану відповідь ШІ у Redis (економія токенів).")
+                return json.loads(cached_result)
+        except Exception as e:
+            logger.warning(f"Помилка читання кешу з Redis: {e}")
+
     report = standard_fields(order)
     
     currency_data = await fetch_realtime_currency_rates()
@@ -154,26 +185,35 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
     try:
         if is_chat_request:
             reply_text = await MultiAgentSystem.run_sales_agent(chat_messages, "")
-            return {"recommendation": reply_text, "ai_summary": reply_text}
+            result = {"recommendation": reply_text, "ai_summary": reply_text}
+        else:
+            # Якщо структура крива — перевіряємо через нашого нового Агента 4 (Fallback Parser)[cite: 26]
+            if not report.get("order_number") or not report.get("customer_name"):
+                raw_str = json.dumps(order, ensure_ascii=False)
+                parsed_data = await MultiAgentSystem.run_fallback_parser_agent(raw_str)
+                if parsed_data:
+                    fill_missing_fields(report, parsed_data)
 
-        # Якщо структура крива — перевіряємо через нашого нового Агента 4 (Fallback Parser)
-        if not report.get("order_number") or not report.get("customer_name"):
-            raw_str = json.dumps(order, ensure_ascii=False)
-            parsed_data = await MultiAgentSystem.run_fallback_parser_agent(raw_str)
-            if parsed_data:
-                fill_missing_fields(report, parsed_data)
+            extracted = await MultiAgentSystem.run_analytics_agent(order, chat_messages)
+            fill_missing_fields(report, extracted)
+            
+            summary = extracted.get("ai_summary")
+            report["ai_summary"] = " ".join(summary.split()) if isinstance(summary, str) else ""
 
-        extracted = await MultiAgentSystem.run_analytics_agent(order, chat_messages)
-        fill_missing_fields(report, extracted)
-        
-        summary = extracted.get("ai_summary")
-        report["ai_summary"] = " ".join(summary.split()) if isinstance(summary, str) else ""
+            chat_sum = extracted.get("chat_summary")
+            if isinstance(chat_sum, str) and chat_sum.strip():
+                report["chat_summary"] = " ".join(chat_sum.split())
 
-        chat_sum = extracted.get("chat_summary")
-        if isinstance(chat_sum, str) and chat_sum.strip():
-            report["chat_summary"] = " ".join(chat_sum.split())
+            result = report
 
-        return report
+        # Зберігаємо успішний результат у Redis на 15 хвилин (900 секунд)
+        if redis:
+            try:
+                await redis.set(cache_key, json.dumps(result, ensure_ascii=False), ex=900)
+            except Exception as e:
+                logger.warning(f"Помилка запису кешу в Redis: {e}")
+
+        return result
 
     except Exception as error:
         logger.error("[ERROR] Помилка обробки замовлення через агента: %s", error, exc_info=True)

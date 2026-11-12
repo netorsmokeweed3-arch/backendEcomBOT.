@@ -9,14 +9,18 @@ from typing import List, Dict, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from order_normalizer import normalize_order
+    from order_normalizer import normalize_order, OrderAPIError
 except ImportError:
     try:
-        from ..order_normalizer import normalize_order
+        from ..order_normalizer import normalize_order, OrderAPIError
     except ImportError:
         # Захисний фолбек, якщо імпорт раптом не спрацює
         def normalize_order(raw: dict, shop: str) -> dict:
             return raw
+        class OrderAPIError(Exception):
+            def __init__(self, message: str, status: int = 400):
+                super().__init__(message)
+                self.status = status
 
 from clients.prom_client import PromClient
 from clients.rozetka_client import RozetkaClient
@@ -63,6 +67,9 @@ class MarketplaceDispatcher:
                     for order in raw_orders if isinstance(order, dict)
                 ]
                 return normalized
+            except OrderAPIError:
+                # Прокидаємо помилки API (наприклад, 401 Unauthorized) далі до server.py для аудиту
+                raise
             except Exception as e:
                 logger.error(f"Помилка збору замовлень з магазину {shop_domain}: {str(e)}")
                 return []
