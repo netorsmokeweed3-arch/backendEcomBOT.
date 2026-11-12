@@ -12,22 +12,19 @@ class PromClient(BaseMarketplaceClient):
 
         url = "https://my.prom.ua/api/v1/orders/list"
         headers = {"Authorization": f"Bearer {token}"}
+        params = {}
+        if self.last_synced_at:
+            params["updated_at_min"] = self.last_synced_at
         
         try:
-            response = await self._make_request("GET", url, headers=headers)
+            response = await self._make_request("GET", url, headers=headers, params=params)
             
             if response.status_code in [401, 403]:
-                logger.warning(f"Помилка авторизації Prom для магазину {self.shop_domain}")
                 raise OrderAPIError("Токен доступу до Prom застарів або недійсний.", response.status_code)
-                
             if response.status_code != 200:
                 raise OrderAPIError(f"Prom API повернув помилку: код {response.status_code}", response.status_code)
                 
-            try:
-                data = response.json()
-            except ValueError as err:
-                raise OrderAPIError("Prom API повернув невалідний JSON.", 502) from err
-
+            data = response.json()
             return data.get("orders", []) if isinstance(data, dict) else []
             
         except OrderAPIError:

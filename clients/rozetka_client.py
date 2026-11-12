@@ -12,22 +12,19 @@ class RozetkaClient(BaseMarketplaceClient):
 
         url = "https://api-seller.rozetka.com.ua/orders"
         headers = {"Authorization": f"Bearer {token}"}
+        params = {}
+        if self.last_synced_at:
+            params["updated_at_min"] = self.last_synced_at
         
         try:
-            response = await self._make_request("GET", url, headers=headers)
+            response = await self._make_request("GET", url, headers=headers, params=params)
             
             if response.status_code in [401, 403]:
-                logger.warning(f"Помилка авторизації Rozetka для магазину {self.shop_domain}")
                 raise OrderAPIError("Токен доступу до Rozetka застарів або недійсний.", response.status_code)
-                
             if response.status_code != 200:
                 raise OrderAPIError(f"Rozetka API повернув помилку: код {response.status_code}", response.status_code)
                 
-            try:
-                data = response.json()
-            except ValueError as err:
-                raise OrderAPIError("Rozetka API повернув невалідний JSON.", 502) from err
-
+            data = response.json()
             return data.get("content", []) if isinstance(data, dict) else []
             
         except OrderAPIError:

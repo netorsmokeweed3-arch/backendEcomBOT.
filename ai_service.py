@@ -144,10 +144,17 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
             report["items"] = items
 
 
-async def analyze_order(order: dict, chat_messages: str) -> dict:
-    """Головна точка входу з інтегрованим спільним Redis-кешуванням відповідей ШІ."""
+async def analyze_order(order: dict, chat_messages: str, user_id: Optional[int] = None, shop_domain: Optional[str] = None) -> dict:
+    """Головна точка входу з інтегрованим ізольованим по tenant/user Redis-кешуванням відповідей ШІ."""
     
-    cache_payload = json.dumps({"order": order, "chat": chat_messages}, sort_keys=True, ensure_ascii=False)
+    # Захист від крос-тенантної колізії: включаємо user_id та shop_domain у ключ кешу
+    cache_payload = json.dumps({
+        "user_id": user_id,
+        "shop_domain": shop_domain,
+        "order": order,
+        "chat": chat_messages
+    }, sort_keys=True, ensure_ascii=False)
+    
     cache_key = f"ai_cache:{hashlib.sha256(cache_payload.encode('utf-8')).hexdigest()}"
     
     redis = await get_redis()
@@ -155,7 +162,7 @@ async def analyze_order(order: dict, chat_messages: str) -> dict:
         try:
             cached_result = await redis.get(cache_key)
             if cached_result:
-                logger.info("⚡ Знайдено кешовану відповідь ШІ у Redis (економія токенів).")
+                logger.info("⚡ Знайдено ізольовану кешовану відповідь ШІ у Redis (економія токенів).")
                 return json.loads(cached_result)
         except Exception as e:
             logger.warning(f"Помилка читання кешу з Redis: {e}")

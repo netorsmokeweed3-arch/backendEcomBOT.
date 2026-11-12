@@ -8,7 +8,7 @@ import logging
 from typing import AsyncGenerator, Optional
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Text, Float, event, select, ForeignKey, DateTime, PrimaryKeyConstraint
+from sqlalchemy import String, Text, Float, event, select, ForeignKey, DateTime, PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 from cryptography.fernet import Fernet
 from datetime import datetime, timezone
@@ -136,6 +136,10 @@ class OrderModel(Base):
     status: Mapped[str] = mapped_column(String(50), default="В обробці", nullable=False)
     raw_payload: Mapped[str] = mapped_column(Text, nullable=True)  # Повний JSON замовлення
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("shop_domain", "external_order_id", name="uq_shop_external_order"),
+    )
 
     items = relationship("OrderItemModel", back_populates="order", cascade="all, delete-orphan")
 

@@ -1,7 +1,8 @@
-"""Єдиний спільний Redis-клієнт для всього застосунку (connection pool)."""
+"""Єдиний спільний Redis-клієнт для всього застосунку (connection pool) з потокобезпечною ініціалізацією."""
 
 import os
 import logging
+import asyncio
 from typing import Optional
 import redis.asyncio as aioredis
 
@@ -9,29 +10,37 @@ logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "")
 _client: Optional[aioredis.Redis] = None
+_init_lock = asyncio.Lock()
 
 
 async def get_redis() -> Optional[aioredis.Redis]:
-    """Повертає спільний клієнт (лінива ініціалізація). None — якщо Redis не налаштовано."""
+    """Повертає спільний клієнт з потокобезпечною лінивою ініціалізацією через asyncio.Lock. None — якщо Redis не налаштовано."""
     global _client
     if not REDIS_URL:
         return None
+    
     if _client is None:
-        _client = aioredis.from_url(
-            REDIS_URL,
-            decode_responses=True,
-            socket_timeout=10.0,
-            socket_connect_timeout=10.0,
-            retry_on_timeout=True,
-            health_check_interval=30,
-            max_connections=20,
-        )
+        async with _init_lock:
+            # Подвійна перевірка (Double-checked locking) для запобігання зайвим ініціалізаціям
+            if _client is None:
+                _client = aioredis.from_url(
+                    REDIS_URL,
+                    decode_responses=True,
+                    socket_timeout=10.0,
+                    socket_connect_timeout=10.0,
+                    retry_on_timeout=True,
+                    health_check_interval=30,
+                    max_connections=20,
+                )
     return _client
 
 
 async def close_redis() -> None:
-    """Закриває спільний пул з'єднань при виході із застосунку."""
+    """Закриває спільний пул з'єднань при виході із застосунку (використовує актуальний aclose для redis >= 5)."""
     global _client
     if _client:
-        await _client.close()
+        try:
+            await _client.aclose()
+        except AttributeError:
+            await _client.close()
         _client = None

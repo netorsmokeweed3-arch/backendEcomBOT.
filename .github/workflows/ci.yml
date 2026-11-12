@@ -42,5 +42,6 @@ jobs:
         APP_ENCRYPTION_KEY: "K_4e9F8aBcD1234567890XyzWvuTsrQPoNmLkJhGFedc="
         JWT_SECRET_KEY: "test-jwt-secret-key-for-github-actions"
         REDIS_URL: "redis://localhost:6379/0"
+        ANTHROPIC_API_KEY: "test-anthropic-mock-key"
       run: |
         pytest -v

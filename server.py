@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 import redis.asyncio as aioredis
 import jwt
 import bcrypt
@@ -63,6 +64,7 @@ from order_normalizer import (
 from clients.dispatcher import MarketplaceDispatcher
 from nova_poshta import get_nova_poshta_tracking
 from ukrposhta import get_ukrposhta_tracking
+from background_worker import background_store_monitor, save_orders_to_db
 
 # --- БЕЗПЕЧНЕ ФОРМАТУВАННЯ ЛОГІВ ЧЕРЕЗ CONTEXTVARS ---
 request_id_var: ContextVar[str] = ContextVar("request_id", default="N/A")
@@ -81,7 +83,7 @@ root_logger.handlers = [handler]
 
 logger = logging.getLogger(__name__)
 
-BACKEND_VERSION = "5.4.0-omniflow-enterprise-jwt-revocation"
+BACKEND_VERSION = "5.5.1-omniflow-enterprise-secure"
 
 dispatcher = MarketplaceDispatcher(max_concurrent=5)
 
@@ -177,7 +179,7 @@ async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depend
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Термін дії JWT токена закінчився.")
     except (jwt.PyJWTError, ValueError, TypeError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Помилка декодування або невалідний формат токена.")
+        raise HTTPException(status_code=401, detail="Помилка декодування або невалідний формат токена.")
 
 
 async def check_rate_limit(identifier: str, max_requests: int = 30, window_seconds: int = 60) -> bool:
@@ -226,8 +228,19 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("OmniFlow: Базу даних ініціалізовано! 🗄️")
 
+    # --- ЗАПУСК ФОНОВОГО ВОРКЕРА МОНІТОРИНГУ ТА ЧЕРГИ ---
+    bg_worker_task = asyncio.create_task(background_store_monitor())
+    logger.info("OmniFlow: Background store monitor & queue worker запущено у фоні! 🚀")
+
     yield
     
+    # --- КОРЕКТНЕ ЗАВЕРШЕННЯ ФОНОВОГО ВОРКЕРА ---
+    bg_worker_task.cancel()
+    try:
+        await bg_worker_task
+    except asyncio.CancelledError:
+        pass
+
     await close_redis()
     await close_db()
     logger.info("OmniFlow: Сервер зупинено.")
@@ -282,8 +295,9 @@ class UserRegisterSchema(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Пароль має містити щонайменше 8 символів.")
-        if len(v) > 128:
-            raise ValueError("Пароль занадто довгий.")
+        # Суворе обмеження довжини до 72 байтів через специфіку bcrypt
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError("Пароль занадто довгий (максимум 72 байти для bcrypt).")
         return v
 
 class UserLoginSchema(BaseModel):
@@ -292,6 +306,9 @@ class UserLoginSchema(BaseModel):
 
 class RefreshTokenSchema(BaseModel):
     refresh_token: str
+
+class LogoutSchema(BaseModel):
+    refresh_token: Optional[str] = None
 
 class StoreCreateSchema(BaseModel):
     shop: str
@@ -354,6 +371,7 @@ class AuthResponse(BaseModel):
 class TokenRefreshResponse(BaseModel):
     success: bool
     access_token: str
+    refresh_token: str
 
 class OrdersResponse(BaseModel):
     success: bool
@@ -389,6 +407,9 @@ async def register(payload: UserRegisterSchema, request: Request, db: AsyncSessi
     db.add(new_user)
     try:
         await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Користувач із такою електронною поштою вже існує.")
     except Exception:
         await db.rollback()
         raise HTTPException(status_code=400, detail="Помилка реєстрації користувача.")
@@ -430,7 +451,7 @@ async def login(payload: UserLoginSchema, request: Request, db: AsyncSession = D
 
 @app.post("/api/auth/refresh", response_model=TokenRefreshResponse, tags=["Auth"])
 async def refresh_token(payload: RefreshTokenSchema):
-    """Видає новий access-токена за дійсним refresh-токеном."""
+    """Видає нову пару access та refresh токенів з ротацією та захистом від повторного використання (Reuse Detection)."""
     try:
         decoded = jwt.decode(payload.refresh_token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         if decoded.get("type") != "refresh":
@@ -438,19 +459,33 @@ async def refresh_token(payload: RefreshTokenSchema):
             
         user_id = decoded.get("sub")
         jti = decoded.get("jti")
+        exp = decoded.get("exp")
+        
         if not user_id or not jti:
             raise HTTPException(status_code=401, detail="Невалідний payload refresh-токена.")
 
-        # Перевірка чи не відкликано цей refresh-токен
         redis = await get_redis()
         if redis:
+            # Перевірка на повторне використання вже скомпрометованого refresh-токена (Reuse Detection)
             is_revoked = await redis.get(f"token:revoked:{jti}")
             if is_revoked:
-                raise HTTPException(status_code=401, detail="Refresh-токен було відкликано.")
+                logger.warning(f"УВАГА: Виявлено спробу повторного використання старого refresh-токена для user_id={user_id}!")
+                raise HTTPException(status_code=401, detail="Спроба повторного використання токена. Будь ласка, увійдіть знову.")
 
-        # Генеруємо новий access-токен
+            # РОТАЦІЯ: Одразу блеклистимо використаний старий refresh-токен на час, що залишився
+            ttl = int(exp - time.time())
+            if ttl > 0:
+                await redis.set(f"token:revoked:{jti}", "reused", ex=ttl)
+
+        # Генеруємо новий access-токен та ОБОВ'ЯЗКОВО новий refresh-токен (повна ротація)
         new_access_token = create_access_token({"sub": str(user_id)})
-        return {"success": True, "access_token": new_access_token}
+        new_refresh_token = create_refresh_token({"sub": str(user_id)})
+        
+        return {
+            "success": True, 
+            "access_token": new_access_token,
+            "refresh_token": new_refresh_token
+        }
         
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Термін дії refresh-токена закінчився. Увійдіть знову.")
@@ -459,29 +494,39 @@ async def refresh_token(payload: RefreshTokenSchema):
 
 
 @app.post("/api/auth/logout", response_model=StandardStatusResponse, tags=["Auth"])
-async def logout(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
-    """Відкликає поточний access-токен (Revocation / Blacklist у Redis)."""
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Відсутній токен для логауту.")
-        
-    try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], options={"verify_signature": True})
-        jti = payload.get("jti")
-        exp = payload.get("exp")
-        
-        if jti and exp:
-            redis = await get_redis()
-            if redis:
-                # Обчислюємо скільки секунд залишилось до кінця життя токена, щоб тримати його в Redis лише потрібний час
+async def logout(payload: Optional[LogoutSchema] = None, credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
+    """Відкликає поточний access-токен та опціональний refresh-токен (Revocation / Blacklist у Redis)."""
+    redis = await get_redis()
+    
+    # 1. Відкликаємо access-токен із заголовка Authorization
+    if credentials:
+        try:
+            token_payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], options={"verify_signature": True})
+            jti = token_payload.get("jti")
+            exp = token_payload.get("exp")
+            
+            if jti and exp and redis:
                 ttl = int(exp - time.time())
                 if ttl > 0:
                     await redis.set(f"token:revoked:{jti}", "revoked", ex=ttl)
-                    
-        return {"success": True, "message": "Успішний вихід із системи. Токен відкликано."}
-    except Exception as e:
-        logger.warning(f"Помилка під час логауту: {e}")
-        # Навіть при помилці декодування повертаємо успіх для клієнта
-        return {"success": True, "message": "Сесію завершено."}
+        except Exception as e:
+            logger.warning(f"Помилка декодування access-токена під час логауту: {e}")
+
+    # 2. Відкликаємо refresh-токен із тіла запиту, якщо передано
+    if payload and payload.refresh_token:
+        try:
+            ref_payload = jwt.decode(payload.refresh_token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], options={"verify_signature": True})
+            ref_jti = ref_payload.get("jti")
+            ref_exp = ref_payload.get("exp")
+            
+            if ref_jti and ref_exp and redis:
+                ref_ttl = int(ref_exp - time.time())
+                if ref_ttl > 0:
+                    await redis.set(f"token:revoked:{ref_jti}", "revoked", ex=ref_ttl)
+        except Exception as e:
+            logger.warning(f"Помилка декодування refresh-токена під час логауту: {e}")
+
+    return {"success": True, "message": "Успішний вихід із системи. Сесію завершено, токени відкликано."}
 
 
 # --- МАРШРУТИ МАГАЗИНІВ (СТОРІНКА /API/STORES) ---
@@ -688,6 +733,10 @@ async def get_orders_multi(user_id: int = Depends(get_current_user_id), db: Asyn
 
 @app.post("/api/tracking", tags=["Logistics"])
 async def track_order_parcel(payload: TrackingSchema, user_id: int = Depends(get_current_user_id)):
+    # Rate Limit на відстеження посилок для захисту від зловживань та спаму
+    if not await check_rate_limit(f"user:{user_id}:tracking", max_requests=15, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Перевищено ліміт запитів на відстеження посилок. Зачекайте.")
+
     ttn = payload.trackingNumber.strip()
     carrier = payload.carrier.strip() if payload.carrier else "Нова Пошта"
     
@@ -700,7 +749,7 @@ async def track_order_parcel(payload: TrackingSchema, user_id: int = Depends(get
 
 
 @app.post("/api/webhook/{platform}", tags=["Webhooks"])
-async def receive_marketplace_webhook(platform: str, request: Request, x_webhook_signature: Optional[str] = Header(None)):
+async def receive_marketplace_webhook(platform: str, request: Request, x_webhook_signature: Optional[str] = Header(None), db: AsyncSession = Depends(get_db)):
     body_bytes = await request.body()
     
     if WEBHOOK_SECRET:
@@ -728,10 +777,35 @@ async def receive_marketplace_webhook(platform: str, request: Request, x_webhook
     try:
         payload = await request.json()
         logger.info(f"OmniFlow: Успішно прийнято новий Webhook від {platform}: {payload.get('id', 'N/A')}")
-        return {"success": True, "message": f"Webhook від {platform} оброблено."}
+        
+        # Справжня обробка та збереження даних вебхука в БД (або чергу)
+        shop_domain = payload.get("shop") or payload.get("domain") or f"webhook-{platform}.local"
+        normalized_shop_domain = normalize_shop(shop_domain) or shop_domain
+        
+        # Шукаємо власника цього магазину в базі
+        store_result = await db.execute(select(StoreCredentialModel).where(StoreCredentialModel.shop_domain == normalized_shop_domain))
+        store_record = store_result.scalars().first()
+        
+        if store_record:
+            user_id = store_record.user_id
+            # Якщо вебхук містить дані замовлення — зберігаємо їх
+            order_data = payload.get("order") or payload
+            if isinstance(order_data, dict) and ("id" in order_data or "order_number" in order_data):
+                await save_orders_to_db(db, user_id, normalized_shop_domain, [order_data])
+            
+            # Логуємо успішну подію вебхука в audit_logs
+            db.add(AuditLogModel(
+                user_id=user_id,
+                shop_domain=normalized_shop_domain,
+                event_type=f"WEBHOOK_{platform.upper()}_RECEIVED",
+                message=f"Успішно опрацьовано вебхук подію для магазину {normalized_shop_domain}"
+            ))
+            await db.commit()
+            
+        return {"success": True, "message": f"Webhook від {platform} успішно опрацьовано та збережено."}
     except Exception as e:
-        logger.error(f"Помилка обробки webhook для {platform}: {str(e)}")
-        raise HTTPException(status_code=400, detail="Невірний формат вебхука.")
+        logger.error(f"Помилка обробки webhook для {platform}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Невірний формат вебхука або помилка обробки.")
 
 
 @app.post("/api/process-ai", tags=["AI & Chat"])
@@ -742,7 +816,7 @@ async def process_ai(payload: ProcessAISchema, request: Request, user_id: int = 
     shop = normalize_shop(payload.shop) or payload.shop
     order = payload.order_data if ("delivery_address" in payload.order_data) else normalize_order(payload.order_data, shop)
     
-    ai_report = await analyze_order(order, payload.chat_messages or "")
+    ai_report = await analyze_order(order, payload.chat_messages or "", user_id=user_id, shop_domain=shop)
     return {"success": True, "ai_report": ai_report}
 
 
@@ -752,6 +826,7 @@ async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Dep
         raise HTTPException(status_code=429, detail="Перевищено ліміт запитів до чату.")
 
     chat_id = payload.chat_id or "default_chat"
+    shop = normalize_shop(payload.shop) or payload.shop
     
     result = await db.execute(select(ChatModeModel).where(
         ChatModeModel.chat_id == chat_id,
@@ -764,7 +839,7 @@ async def chat_with_ai(payload: ChatSchema, request: Request, user_id: int = Dep
         return {"success": True, "reply": "", "mode": "manual", "info": "Чат у ручному режимі."}
 
     dummy_order = {"id": "chat-session", "customer_name": "Покупець у чаті", "items": []}
-    ai_report = await analyze_order(dummy_order, payload.message)
+    ai_report = await analyze_order(dummy_order, payload.message, user_id=user_id, shop_domain=shop)
     ai_reply = ai_report.get("recommendation") or ai_report.get("ai_summary") or "Вітаю! Чим можу допомогти?"
 
     return {"success": True, "reply": ai_reply, "mode": "ai"}

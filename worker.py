@@ -16,6 +16,7 @@ if Path(".env").exists():
     load_dotenv()
 
 from database import init_db, close_db, AsyncSessionLocal, select, StoreCredentialModel, OrderModel, OrderItemModel, decrypt_credential
+from sqlalchemy.orm import selectinload
 from clients.dispatcher import MarketplaceDispatcher
 
 # Налаштування логування для воркера
@@ -38,9 +39,11 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
         if not external_id:
             continue
             
-        # Перевіряємо, чи існує вже таке замовлення для цього магазину
+        # Перевіряємо, чи існує вже таке замовлення для цього магазину (з selectinload для уникнення MissingGreenlet)
         result = await db.execute(
-            select(OrderModel).where(
+            select(OrderModel)
+            .options(selectinload(OrderModel.items))
+            .where(
                 OrderModel.shop_domain == shop_domain,
                 OrderModel.external_order_id == external_id
             )
@@ -52,14 +55,18 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
         phone = str(raw.get("phone") or "")
         email = str(raw.get("email") or "")
         currency = str(raw.get("currency") or "UAH")
-        status = str(raw.get("status") or "В обробці")
+        status_obj = raw.get("status", "В обробці")
+        status = str(status_obj.get("text") if isinstance(status_obj, dict) else status_obj)
         
-        # Безпечне парсинг загальної суми
+        # Безпечне парсинг загальної суми (підтримка як dict від нормалізатора, так і чисел)
         total_raw = raw.get("total_amount", 0)
-        try:
-            total_amount = float(total_raw) if not isinstance(total_raw, dict) else float(total_raw.get("amount", 0))
-        except (ValueError, TypeError):
-            total_amount = 0.0
+        if isinstance(total_raw, dict):
+            total_amount = float(total_raw.get("amount", 0) or 0)
+        else:
+            try:
+                total_amount = float(total_raw)
+            except (ValueError, TypeError):
+                total_amount = 0.0
 
         raw_payload_str = json.dumps(raw, ensure_ascii=False)
 
@@ -97,7 +104,7 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
             for item in list(existing_order.items):
                 await db.delete(item)
 
-        # Додаємо товари (items)
+        # Додаємо товари (items) з урахуванням того, що нормалізатор повертає unit_price як словник
         items = raw.get("items", []) or raw.get("line_items", [])
         if isinstance(items, list):
             for it in items:
@@ -111,11 +118,14 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
                 except (ValueError, TypeError):
                     quantity = 1.0
 
-                price_raw = it.get("price") or it.get("unit_price") or 0
-                try:
-                    unit_price = float(price_raw)
-                except (ValueError, TypeError):
-                    unit_price = 0.0
+                price_raw = it.get("unit_price") if "unit_price" in it else it.get("price", 0)
+                if isinstance(price_raw, dict):
+                    unit_price = float(price_raw.get("amount", 0) or 0)
+                else:
+                    try:
+                        unit_price = float(price_raw)
+                    except (ValueError, TypeError):
+                        unit_price = 0.0
 
                 db.add(OrderItemModel(
                     order_id=target_order.id,
@@ -143,11 +153,15 @@ async def background_store_monitor_loop():
                     for store in stores:
                         try:
                             credentials = json.loads(decrypt_credential(store.encrypted_credentials))
+                            
+                            # Передаємо last_synced_at для справжньої інкрементальності[cite: 3]
                             store_config = {
                                 "platform": store.platform,
                                 "shop": store.shop_domain,
-                                "credentials": credentials
+                                "credentials": credentials,
+                                "last_synced_at": store.last_synced_at.isoformat() if store.last_synced_at else None
                             }
+                            
                             # Отримуємо замовлення з маркетплейсу
                             orders = await dispatcher.fetch_store_orders(store_config)
                             if orders:
@@ -157,7 +171,7 @@ async def background_store_monitor_loop():
                             store.last_synced_at = datetime.now(timezone.utc)
                             await db.commit()
                             
-                            logger.info(f"Успішно синхронізовано магазин {store.shop_domain}. Замовлень: {len(orders)}. Last synced: {store.last_synced_at}")
+                            logger.info(f"Успішно синхронізовано магазин {store.shop_domain}. Замовлень: {len(orders) if orders else 0}. Last synced: {store.last_synced_at}")
                         except Exception as store_err:
                             logger.error(f"Помилка синхронізації магазину {store.shop_domain}: {store_err}")
                 else:

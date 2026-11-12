@@ -66,11 +66,17 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
             back_delivery_sum = str(info.get("AfterpaymentOnGoodsSum", "0"))
             date_time = str(info.get("DateTimelabel", ""))
             
+            # Безпечний парсинг afterpayment sum із захистом від текстового сміття (ValueError)
+            try:
+                parsed_back_delivery = float(back_delivery_sum)
+            except (ValueError, TypeError):
+                parsed_back_delivery = 0.0
+
             timeline = [
                 "📦 Зареєстровано в системі Нової Пошти",
                 f"📍 Отримано/прямує до: {warehouse_recipient}" if warehouse_recipient else "📍 У дорозі",
                 f"⚖️ Вага: {document_weight} кг" if document_weight else "",
-                f"💰 Післяплата: {back_delivery_sum} грн" if float(back_delivery_sum or 0) > 0 else "✅ Оплачено",
+                f"💰 Післяплата: {back_delivery_sum} грн" if parsed_back_delivery > 0 else "✅ Оплачено",
                 f"🔄 Поточний статус: {status_text} ({date_time})"
             ]
             
@@ -96,11 +102,6 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
     except Exception as e:
         logger.error(f"Критична помилка запиту до API Нової Пошти: {str(e)}", exc_info=True)
         return {"success": False, "error": "Внутрішня помилка при перевірці посилки Нової Пошти."}
-    
-
-
-
-
 
 
 

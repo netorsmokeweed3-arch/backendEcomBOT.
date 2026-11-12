@@ -19,22 +19,20 @@ class WooCommerceClient(BaseMarketplaceClient):
             clean_url = f"https://{clean_url}"
             
         url = f"{clean_url}/wp-json/wc/v3/orders"
+        params = {"per_page": 50}
+        if self.last_synced_at:
+            params["after"] = self.last_synced_at
         
         try:
-            response = await self._make_request("GET", url, auth=(ck, cs))
+            response = await self._make_request("GET", url, auth=(ck, cs), params=params)
             
             if response.status_code in [401, 403]:
-                logger.warning(f"Помилка авторизації WooCommerce для магазину {self.shop_domain}")
                 raise OrderAPIError("Ключі доступу WooCommerce недійсні або застаріли.", response.status_code)
-                
             if response.status_code != 200:
                 raise OrderAPIError(f"WooCommerce API повернув помилку: код {response.status_code}", response.status_code)
                 
-            try:
-                data = response.json()
-                return data if isinstance(data, list) else []
-            except ValueError as err:
-                raise OrderAPIError(f"Магазин WooCommerce «{self.shop_domain}» повернув невалідний JSON.", 502) from err
+            data = response.json()
+            return data if isinstance(data, list) else []
                 
         except OrderAPIError:
             raise

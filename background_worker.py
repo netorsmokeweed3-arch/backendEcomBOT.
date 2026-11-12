@@ -7,11 +7,13 @@
 import os
 import logging
 import asyncio
+import json as jsonlib
 from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from database import AsyncSessionLocal, PushTokenModel, StoreCredentialModel, AuditLogModel
+from database import AsyncSessionLocal, PushTokenModel, StoreCredentialModel, AuditLogModel, OrderModel, OrderItemModel, decrypt_credential
 from redis_pool import get_redis
 from clients.dispatcher import MarketplaceDispatcher
 from worker_queue import dequeue_shop_sync
@@ -21,6 +23,109 @@ logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 dispatcher = MarketplaceDispatcher(max_concurrent=5)
+
+
+async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
+    """Зберігає або оновлює замовлення в базі даних (Upsert логіка) з обробкою позицій."""
+    for raw in orders:
+        if not isinstance(raw, dict):
+            continue
+            
+        external_id = str(raw.get("id") or raw.get("order_number") or "")
+        if not external_id:
+            continue
+            
+        result = await db.execute(
+            select(OrderModel)
+            .options(selectinload(OrderModel.items))
+            .where(
+                OrderModel.shop_domain == shop_domain,
+                OrderModel.external_order_id == external_id
+            )
+        )
+        existing_order = result.scalars().first()
+        
+        order_number = str(raw.get("order_number") or external_id)
+        customer_name = str(raw.get("customer_name") or "")
+        phone = str(raw.get("phone") or "")
+        email = str(raw.get("email") or "")
+        currency = str(raw.get("currency") or "UAH")
+        status_obj = raw.get("status", "В обробці")
+        status = str(status_obj.get("text") if isinstance(status_obj, dict) else status_obj)
+        
+        total_raw = raw.get("total_amount", 0)
+        if isinstance(total_raw, dict):
+            total_amount = float(total_raw.get("amount", 0) or 0)
+        else:
+            try:
+                total_amount = float(total_raw)
+            except (ValueError, TypeError):
+                total_amount = 0.0
+
+        raw_payload_str = jsonlib.dumps(raw, ensure_ascii=False)
+
+        if existing_order:
+            existing_order.customer_name = customer_name
+            existing_order.phone = phone
+            existing_order.email = email
+            existing_order.total_amount = total_amount
+            existing_order.currency = currency
+            existing_order.status = status
+            existing_order.raw_payload = raw_payload_str
+            target_order = existing_order
+        else:
+            new_order = OrderModel(
+                user_id=user_id,
+                shop_domain=shop_domain,
+                external_order_id=external_id,
+                order_number=order_number,
+                customer_name=customer_name,
+                phone=phone,
+                email=email,
+                total_amount=total_amount,
+                currency=currency,
+                status=status,
+                raw_payload=raw_payload_str
+            )
+            db.add(new_order)
+            await db.flush()
+            target_order = new_order
+
+        if existing_order:
+            for item in list(existing_order.items):
+                await db.delete(item)
+
+        items = raw.get("items", []) or raw.get("line_items", [])
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                title = str(it.get("title") or it.get("name") or "Товар")
+                sku = str(it.get("sku") or "")
+                qty = it.get("quantity") or it.get("qty") or 1
+                try:
+                    quantity = float(qty)
+                except (ValueError, TypeError):
+                    quantity = 1.0
+
+                price_raw = it.get("unit_price") if "unit_price" in it else it.get("price", 0)
+                if isinstance(price_raw, dict):
+                    unit_price = float(price_raw.get("amount", 0) or 0)
+                else:
+                    try:
+                        unit_price = float(price_raw)
+                    except (ValueError, TypeError):
+                        unit_price = 0.0
+
+                db.add(OrderItemModel(
+                    order_id=target_order.id,
+                    sku=sku,
+                    title=title,
+                    quantity=quantity,
+                    unit_price=unit_price
+                ))
+
+    await db.commit()
 
 
 async def acquire_distributed_lock(lock_key: str, expire_seconds: int = 300) -> bool:
@@ -85,8 +190,8 @@ async def send_push_notification(title: str, body: str, data: dict = None, user_
 
 async def process_shop_sync_queue() -> None:
     """
-    Фоновий воркер, який постійно слухає чергу sync-завдань із Redis за допомогою BRPOP
-    та виконує реальну синхронізацію магазину.
+    Фоновий воркер, який постійно слухає чергу sync-завдань із Redis за допомогою BRPOP,
+    збирає замовлення та фізично зберігає їх у базу даних.
     """
     redis = await get_redis()
     if not redis:
@@ -115,20 +220,26 @@ async def process_shop_sync_queue() -> None:
                             logger.error(f"❌ Магазин {shop} не знайдено для користувача {user_id}")
                             continue
                         
-                        import json as jsonlib
-                        from database import decrypt_credential
                         credentials = jsonlib.loads(decrypt_credential(store_cred.encrypted_credentials))
                         
                         store_config = {
                             "platform": store_cred.platform,
                             "shop": shop,
-                            "credentials": credentials
+                            "credentials": credentials,
+                            "last_synced_at": store_cred.last_synced_at.isoformat() if store_cred.last_synced_at else None
                         }
                         
+                        # 1. Запит до маркетплейсу через диспетчер
                         orders = await dispatcher.fetch_store_orders(store_config)
-                        logger.info(f"✅ Фонова синхронізація магазину {shop} успішно завершена! Завантажено замовлень: {len(orders)}")
                         
-                        # Логування успіху в аудит
+                        # 2. Реальне збереження замовлень у базу даних (критичний зв'язок)
+                        if orders:
+                            await save_orders_to_db(db, user_id, shop, orders)
+                        
+                        # 3. Оновлення мітки останньої синхронізації
+                        store_cred.last_synced_at = datetime.now(timezone.utc)
+                        
+                        # 4. Логування успіху в аудит
                         db.add(AuditLogModel(
                             user_id=user_id,
                             shop_domain=shop,
@@ -136,6 +247,7 @@ async def process_shop_sync_queue() -> None:
                             message=f"Успішно синхронізовано. Замовлень: {len(orders)}"
                         ))
                         await db.commit()
+                        logger.info(f"✅ Фонова синхронізація магазину {shop} успішно завершена! Завантажено замовлень: {len(orders)}")
                         
                 except OrderAPIError as oae:
                     logger.error(f"❌ API помилка синхронізації для {shop}: {oae}")
@@ -177,8 +289,8 @@ async def background_store_monitor() -> None:
                 current_minute = now.minute
                 current_date = now.date()
 
-                # --- 1. РАНКОВИЙ ЗВІТ (О 8:00 UTC) ---
-                if current_hour == 8 and current_minute == 0 and last_morning_report_day != current_date:
+                # --- 1. РАНКОВИЙ ЗВІТ (О 8:00-8:04 UTC з захистом від дрейфу) ---
+                if current_hour == 8 and current_minute < 5 and last_morning_report_day != current_date:
                     lock_key = f"lock:morning_report:{current_date}"
                     
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
@@ -191,8 +303,8 @@ async def background_store_monitor() -> None:
                     else:
                         logger.info("Ранковий звіт вже виконується іншим інстансом сервера. Пропускаємо.")
 
-                # --- 2. ВЕЧІРНІЙ ЗВІТ (О 21:00 UTC) ---
-                if current_hour == 21 and current_minute == 0 and last_evening_report_day != current_date:
+                # --- 2. ВЕЧІРНІЙ ЗВІТ (О 21:00-21:04 UTC з захистом від дрейфу) ---
+                if current_hour == 21 and current_minute < 5 and last_evening_report_day != current_date:
                     lock_key = f"lock:evening_report:{current_date}"
                     
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
