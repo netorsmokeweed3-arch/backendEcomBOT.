@@ -21,4 +21,4 @@ flask
 python-dotenv
 pytest
 pytest-asyncio
-psycopg2-binary
+psycopg[binary]
