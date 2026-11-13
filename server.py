@@ -8,12 +8,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from redis.asyncio import Redis
 import jwt
 
-# Імпорт створених нами модульних роутерів
-from routers.auth import router as auth_router
-from routers.stores import router as stores_router
-from routers.orders import router as orders_router
-from routers.ai_support import router as ai_support_router
-
 # Налаштування структурованого логування
 logging.basicConfig(
     level=logging.INFO,
@@ -114,7 +108,12 @@ async def get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Помилка валідації токена.")
 
 
-# --- ПІДКЛЮЧЕННЯ РОУТЕРІВ ---
+# --- ПІДКЛЮЧЕННЯ РОУТЕРІВ (ПЕРЕНЕСЕНО В КІНЕЦЬ ДЛЯ УНИКНЕННЯ ЦИКЛІЧНОГО ІМПОРТУ) ---
+from routers.auth import router as auth_router
+from routers.stores import router as stores_router
+from routers.orders import router as orders_router
+from routers.ai_support import router as ai_support_router
+
 app.include_router(auth_router)
 app.include_router(stores_router)
 app.include_router(orders_router)
