@@ -1,142 +1,118 @@
-import os
 import logging
-import asyncio
-import time
-import uuid
-from typing import Dict, List
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
-from pathlib import Path
-
-if Path(".env").exists():
-    from dotenv import load_dotenv
-    load_dotenv()
-
-import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-
-from fastapi import FastAPI, Request
-from fastapi.security import HTTPBearer
+from typing import Optional
+from fastapi import FastAPI, Request, HTTPException, Depends, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from redis.asyncio import Redis
+import jwt
 
-# Ініціалізація Sentry
-SENTRY_DSN = os.getenv("SENTRY_DSN", "")
-if SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        integrations=[FastApiIntegration()],
-        traces_sample_rate=1.0,
-        environment=os.getenv("ENVIRONMENT", "production")
-    )
-
-from database import init_db, close_db, AsyncSessionLocal
-from redis_pool import get_redis, close_redis
-from clients.dispatcher import MarketplaceDispatcher
-from background_worker import background_store_monitor
-
-# Підключаємо роутери
+# Імпорт створених нами модульних роутерів
 from routers.auth import router as auth_router
 from routers.stores import router as stores_router
 from routers.orders import router as orders_router
 from routers.ai_support import router as ai_support_router
 
-request_id_var: ContextVar[str] = ContextVar("request_id", default="N/A")
-
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        record.request_id = request_id_var.get("N/A")
-        return super().format(record)
-
-handler = logging.StreamHandler()
-handler.setFormatter(SafeFormatter("%(asctime)s [%(levelname)s] [ReqID: %(request_id)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-root_logger.handlers = [handler]
-
+# Налаштування структурованого логування
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-BACKEND_VERSION = "5.5.1-omniflow-enterprise-secure"
-
-dispatcher = MarketplaceDispatcher(max_concurrent=5)
-
-memory_rate_limit: Dict[str, List[float]] = {}
-rate_limit_lock = asyncio.Lock()
-
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not JWT_SECRET_KEY:
-    raise RuntimeError("КРИТИЧНА ПОМИЛКА БЕЗПЕКИ: JWT_SECRET_KEY не задана!")
-
+# Конфігурація безпеки та токенів
+JWT_SECRET_KEY = "your-super-secret-jwt-key-change-in-production"
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_EXPIRATION_MINUTES = 15
 JWT_REFRESH_EXPIRATION_DAYS = 7
+BACKEND_VERSION = "2.0.0"
+WEBHOOK_SECRET = "your-webhook-secret-change-in-production"
 
+redis_client: Optional[Redis] = None
 security_scheme = HTTPBearer(auto_error=False)
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    redis = await get_redis()
-    if redis:
-        try:
-            await redis.ping()
-            logger.info("OmniFlow: Підключено до Redis! ⚡")
-        except Exception as e:
-            logger.error(f"Помилка Redis: {e}")
-
-    await init_db()
-    logger.info("OmniFlow: Базу даних ініціалізовано! 🗄️")
-
-    bg_worker_task = asyncio.create_task(background_store_monitor())
-    logger.info("OmniFlow: Background store monitor запущено! 🚀")
+    """Життєвий цикл додатку: ініціалізація та закриття з'єднань з Redis."""
+    global redis_client
+    try:
+        redis_client = Redis(host="localhost", port=6379, decode_responses=True)
+        await redis_client.ping()
+        logger.info("Успішно підключено до Redis.")
+    except Exception as e:
+        logger.warning(f"Не вдалося підключитися до Redis (ліміти працюватимуть у фолбек-режимі): {e}")
+        redis_client = None
 
     yield
-    
-    bg_worker_task.cancel()
-    try:
-        await bg_worker_task
-    except asyncio.CancelledError:
-        pass
 
-    await close_redis()
-    await close_db()
-    logger.info("OmniFlow: Сервер зупинено.")
+    if redis_client:
+        await redis_client.close()
+        logger.info("З'єднання з Redis успішно закрито.")
 
+
+# Створення основного FastAPI додатку (Enterprise Core)
 app = FastAPI(
-    title="OmniFlow Enterprise SaaS API",
+    title="Enterprise Marketplace Core API",
     version=BACKEND_VERSION,
     lifespan=lifespan
 )
 
-@app.middleware("http")
-async def add_request_id_and_logging(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    token = request_id_var.set(request_id)
-
-    start_time = time.time()
-    try:
-        response = await call_next(request)
-    finally:
-        request_id_var.reset(token)
-
-    duration = (time.time() - start_time) * 1000
-    response.headers["X-Request-ID"] = request_id
-    logger.info(f"Path: {request.url.path} | Method: {request.method} | Status: {response.status_code} | Duration: {duration:.2f}ms")
-    return response
-
-raw_origins = os.getenv("ALLOWED_ORIGINS", "")
-if not raw_origins:
-    origins_list = ["http://localhost:3000", "http://localhost:8081", "http://localhost:19006"]
-else:
-    origins_list = [o.strip() for o in raw_origins.split(",") if o.strip()]
-
+# Налаштування CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins_list,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Webhook-Signature"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+
+# --- ГЛОБАЛЬНІ СЕРВЕРНІ ЗАЛЕЖНОСТІ ТА УТИЛІТИ ---
+async def get_redis() -> Optional[Redis]:
+    return redis_client
+
+
+async def check_rate_limit(identifier: str, max_requests: int, window_seconds: int = 60) -> bool:
+    """Глобальна перевірка лімітів через Redis із безпечним фолбеком при збоях."""
+    if not redis_client:
+        return True
+    try:
+        current = await redis_client.incr(identifier)
+        if current == 1:
+            await redis_client.expire(identifier, window_seconds)
+        return current <= max_requests
+    except Exception as e:
+        logger.error(f"Помилка Rate Limiter у Redis: {e}")
+        return True
+
+
+async def get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)) -> int:
+    """Витягує та валідує user_id з валідного Access Token з перевіркою чорного списку (Revocation)."""
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Відсутній токен авторизації.")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Невалідний тип токена.")
+        
+        user_id = payload.get("sub")
+        jti = payload.get("jti")
+        
+        if not user_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Невірний payload токена.")
+        
+        if redis_client and jti and await redis_client.get(f"token:revoked:{jti}"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Токен відкликано.")
+            
+        return int(user_id)
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Термін дії токена закінчився.")
+    except (jwt.PyJWTError, ValueError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Помилка валідації токена.")
+
 
 # --- ПІДКЛЮЧЕННЯ РОУТЕРІВ ---
 app.include_router(auth_router)
@@ -144,6 +120,8 @@ app.include_router(stores_router)
 app.include_router(orders_router)
 app.include_router(ai_support_router)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=True)
+
+@app.get("/health", tags=["System"])
+async def health_check():
+    """Перевірка стану мікросервісу."""
+    return {"status": "healthy", "service": "active", "version": BACKEND_VERSION}

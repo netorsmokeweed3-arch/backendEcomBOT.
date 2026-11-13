@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Завантажуємо змінні середовища
 if Path(".env").exists():
     from dotenv import load_dotenv
     load_dotenv()
@@ -19,7 +18,6 @@ from database import init_db, close_db, AsyncSessionLocal, select, StoreCredenti
 from sqlalchemy.orm import selectinload
 from clients.dispatcher import MarketplaceDispatcher
 
-# Налаштування логування для воркера
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [WORKER] [%(levelname)s] %(message)s",
@@ -28,6 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger("OmniFlowWorker")
 
 dispatcher = MarketplaceDispatcher(max_concurrent=5)
+
 
 async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
     """Зберігає або оновлює замовлення в базі даних (Upsert логіка)."""
@@ -39,7 +38,6 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
         if not external_id:
             continue
             
-        # Перевіряємо, чи існує вже таке замовлення для цього магазину (з selectinload для уникнення MissingGreenlet)
         result = await db.execute(
             select(OrderModel)
             .options(selectinload(OrderModel.items))
@@ -58,7 +56,6 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
         status_obj = raw.get("status", "В обробці")
         status = str(status_obj.get("text") if isinstance(status_obj, dict) else status_obj)
         
-        # Безпечне парсинг загальної суми (підтримка як dict від нормалізатора, так і чисел)
         total_raw = raw.get("total_amount", 0)
         if isinstance(total_raw, dict):
             total_amount = float(total_raw.get("amount", 0) or 0)
@@ -71,7 +68,6 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
         raw_payload_str = json.dumps(raw, ensure_ascii=False)
 
         if existing_order:
-            # Оновлюємо існуюче замовлення
             existing_order.customer_name = customer_name
             existing_order.phone = phone
             existing_order.email = email
@@ -81,7 +77,6 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
             existing_order.raw_payload = raw_payload_str
             target_order = existing_order
         else:
-            # Створюємо нове замовлення
             new_order = OrderModel(
                 user_id=user_id,
                 shop_domain=shop_domain,
@@ -96,15 +91,13 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
                 raw_payload=raw_payload_str
             )
             db.add(new_order)
-            await db.flush() # Отримуємо ID нового замовлення
+            await db.flush()
             target_order = new_order
 
-        # Очищаємо старі товари цього замовлення перед оновленням
         if existing_order:
             for item in list(existing_order.items):
                 await db.delete(item)
 
-        # Додаємо товари (items) з урахуванням того, що нормалізатор повертає unit_price як словник
         items = raw.get("items", []) or raw.get("line_items", [])
         if isinstance(items, list):
             for it in items:
@@ -137,6 +130,7 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
 
     await db.commit()
 
+
 async def background_store_monitor_loop():
     """Фоновий цикл інкрементального моніторингу та синхронізації магазинів."""
     logger.info("Фоновий воркер інкрементальної синхронізації задеплоєно. 🔄")
@@ -154,7 +148,6 @@ async def background_store_monitor_loop():
                         try:
                             credentials = json.loads(decrypt_credential(store.encrypted_credentials))
                             
-                            # Передаємо last_synced_at для справжньої інкрементальності[cite: 3]
                             store_config = {
                                 "platform": store.platform,
                                 "shop": store.shop_domain,
@@ -162,12 +155,10 @@ async def background_store_monitor_loop():
                                 "last_synced_at": store.last_synced_at.isoformat() if store.last_synced_at else None
                             }
                             
-                            # Отримуємо замовлення з маркетплейсу
                             orders = await dispatcher.fetch_store_orders(store_config)
                             if orders:
                                 await save_orders_to_db(db, store.user_id, store.shop_domain, orders)
                             
-                            # Оновлюємо мітку часу останньої успішної інкрементальної синхронізації
                             store.last_synced_at = datetime.now(timezone.utc)
                             await db.commit()
                             
@@ -180,8 +171,8 @@ async def background_store_monitor_loop():
         except Exception as e:
             logger.error(f"Помилка у фоновому воркері: {e}", exc_info=True)
             
-        # Інтервал між перевірками (кожні 5 хвилин)
         await asyncio.sleep(300)
+
 
 async def main():
     logger.info("Ініціалізація бази даних для воркера...")
@@ -194,6 +185,7 @@ async def main():
     finally:
         await close_db()
         logger.info("З'єднання воркера успішно закриті.")
+
 
 if __name__ == "__main__":
     try:

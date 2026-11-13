@@ -1,3 +1,7 @@
+"""Сервісний шар для обробки замовлень та взаємодії з ШІ-агентами.
+Містить стандартизацію полів, заповнення пропущених даних та кешування відповідей у Redis.
+"""
+
 import json
 import logging
 import asyncio
@@ -10,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def standard_fields(order: dict) -> dict:
+    """Нормалізує та стандартизує сирі дані замовлення у єдиний формат звіту."""
     safe_order = order if isinstance(order, dict) else {}
     address = safe_order.get("delivery_address") or safe_order.get("shipping_address") or {}
     total = safe_order.get("total_amount") or {}
@@ -67,7 +72,10 @@ def standard_fields(order: dict) -> dict:
             lt_formatted = str(lt)
         else:
             price = item.get("price") or item.get("unit_price", 0)
-            lt_formatted = str(price * quantity) if price else ""
+            try:
+                lt_formatted = str(float(price) * quantity) if price else ""
+            except (ValueError, TypeError):
+                lt_formatted = ""
 
         formatted_items.append({
             "title": str(title),
@@ -104,6 +112,7 @@ def standard_fields(order: dict) -> dict:
 
 
 def fill_missing_fields(report: dict, extracted: dict) -> None:
+    """Заповнює порожні поля звіту даними, витягнутими ШІ-агентами."""
     if not isinstance(extracted, dict):
         return
 
@@ -144,7 +153,12 @@ def fill_missing_fields(report: dict, extracted: dict) -> None:
             report["items"] = items
 
 
-async def analyze_order(order: dict, chat_messages: str, user_id: Optional[int] = None, shop_domain: Optional[str] = None) -> dict:
+async def analyze_order(
+    order: dict, 
+    chat_messages: str, 
+    user_id: Optional[int] = None, 
+    shop_domain: Optional[str] = None
+) -> dict:
     """Головна точка входу з інтегрованим ізольованим по tenant/user Redis-кешуванням відповідей ШІ."""
     
     # Захист від крос-тенантної колізії: включаємо user_id та shop_domain у ключ кешу

@@ -4,6 +4,7 @@
 
 import os
 import logging
+from typing import Any, Dict
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -11,9 +12,8 @@ logger = logging.getLogger(__name__)
 NP_API_URL = "https://api.novaposhta.ua/v2.0/json/"
 
 
-async def get_nova_poshta_tracking(ttn: str) -> dict:
-    """
-    Асинхронно отримує статус, вагу, післяплата та історію посилки за номером ТТН.
+async def get_nova_poshta_tracking(ttn: str) -> Dict[str, Any]:
+    """Асинхронно отримує статус, вагу, післяплату та історію посилки за номером ТТН.
     Захищений від таймаутів, невалідного JSON та відсутності ключів у середовищі.
     """
     if not isinstance(ttn, str) or not ttn.strip():
@@ -41,7 +41,6 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
     }
     
     try:
-        # Використовуємо асинхронний клієнт із суворим таймаутом
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(NP_API_URL, json=payload)
             
@@ -66,7 +65,6 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
             back_delivery_sum = str(info.get("AfterpaymentOnGoodsSum", "0"))
             date_time = str(info.get("DateTimelabel", ""))
             
-            # Безпечний парсинг afterpayment sum із захистом від текстового сміття (ValueError)
             try:
                 parsed_back_delivery = float(back_delivery_sum)
             except (ValueError, TypeError):
@@ -91,7 +89,6 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
                 "timelineEvents": [event for event in timeline if event]
             }
             
-        # Якщо API відповіло успішно, але ТТН не знайдено в масиві data
         errors = data.get("errors", [])
         error_msg = errors[0] if errors else "ТТН не знайдено або введено некоректно."
         return {"success": False, "error": error_msg}
@@ -100,12 +97,8 @@ async def get_nova_poshta_tracking(ttn: str) -> dict:
         logger.error(f"Таймаут з'єднання при запиті ТТН {clean_ttn} до Нової Пошти")
         return {"success": False, "error": "Час очікування відповіді від Нової Пошти вичерпано."}
     except Exception as e:
-        logger.error(f"Критична помилка запиту до API Нової Пошти: {str(e)}", exc_info=True)
+        logger.error(f"Критична помилка запиту до API Нової Пошти: {e}", exc_info=True)
         return {"success": False, "error": "Внутрішня помилка при перевірці посилки Нової Пошти."}
-
-
-
-
 
 
 

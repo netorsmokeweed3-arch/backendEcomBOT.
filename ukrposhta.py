@@ -4,6 +4,7 @@
 
 import os
 import logging
+from typing import Any, Dict
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -11,9 +12,8 @@ logger = logging.getLogger(__name__)
 UP_API_URL = "https://www.ukrposhta.ua/e-commerce/0.0.1/barcodes"
 
 
-async def get_ukrposhta_tracking(ttn: str) -> dict:
-    """
-    Асинхронно отримує статус відправлення та історію подій для Укрпошти за штрих-кодом (ТТН).
+async def get_ukrposhta_tracking(ttn: str) -> Dict[str, Any]:
+    """Асинхронно отримує статус відправлення та історію подій для Укрпошти за штрих-кодом (ТТН).
     Захищений від збоїв структури JSON та мережевих таймаутів.
     """
     if not isinstance(ttn, str) or not ttn.strip():
@@ -76,5 +76,5 @@ async def get_ukrposhta_tracking(ttn: str) -> dict:
         logger.error(f"Таймаут з'єднання при запиті ТТН {clean_ttn} до Укрпошти")
         return {"success": False, "error": "Час очікування відповіді від Укрпошти вичерпано."}
     except Exception as e:
-        logger.error(f"Критична помилка запиту до API Укрпошти: {str(e)}", exc_info=True)
+        logger.error(f"Критична помилка запиту до API Укрпошти: {e}", exc_info=True)
         return {"success": False, "error": "Внутрішня помилка при перевірці посилки Укрпошти."}

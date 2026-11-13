@@ -1,3 +1,7 @@
+"""Модуль інтеграції з Anthropic Claude API та оркестрації ШІ-агентів (Enterprise Edition).
+Містить захищені системні промпти, роботу з курсами валют НБУ та механізми повторних спроб (Retry).
+"""
+
 import json
 import os
 import logging
@@ -19,7 +23,7 @@ client = anthropic.AsyncAnthropic(
     timeout=30.0
 )
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5") 
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022") 
 MAX_TOKENS_LIMIT = 800  
 MAX_INPUT_LENGTH = 2000 
 MAX_RETRIES = 3 
@@ -89,7 +93,7 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
     rates_info = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as httpx_client:
-            response = await httpx_client.get("https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json")
+            response = await httpx_client.get("[https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json](https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json)")
             if response.status_code == 200:
                 data = response.json()
                 for item in data:
@@ -112,6 +116,7 @@ async def fetch_realtime_currency_rates() -> Dict[str, Any]:
         
     return rates_info
 
+
 def _sanitize_input(text: Any, max_len: int = MAX_INPUT_LENGTH) -> str:
     """Санітизація вхідного тексту з динамічним лімітом символів."""
     if not isinstance(text, str):
@@ -123,6 +128,7 @@ def _sanitize_input(text: Any, max_len: int = MAX_INPUT_LENGTH) -> str:
 
 
 def _safe_parse_json(text: str) -> Dict[str, Any]:
+    """Безпечний розпарсинг JSON із відповідей ШІ з очищенням від маркдауну."""
     if not isinstance(text, str) or not text.strip():
         return {}
     
@@ -158,6 +164,7 @@ def _safe_parse_json(text: str) -> Dict[str, Any]:
 
 
 async def _call_claude_with_retry(system_prompt: str, user_prompt: str, max_tokens: int = 400) -> str:
+    """Виклик Claude API з експоненційним затримкою та повторними спробами (Retry)."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = await client.messages.create(
@@ -259,7 +266,7 @@ class MultiAgentSystem:
 
     @staticmethod
     async def run_fallback_parser_agent(raw_json_str: str) -> Dict[str, Any]:
-        """Агент 4: Збільшено ліміт санітизації до 10000 символів для обробки великих замовлень."""
+        """Агент 4: Експерт з інтеграції даних з розширеним лімітом вхідного тексту."""
         safe_json_str = _sanitize_input(raw_json_str, max_len=10000)
         if not safe_json_str:
             return {}

@@ -1,18 +1,15 @@
 """Універсальний обробник замовлень для SaaS-платформи (Enterprise Edition).
-Містить повну базу ключів-синонімів для всіх магазинів і маркетплейсів,
-Pydantic-валідацію та безпечну нормалізацію даних.
+Оптимізовано для високих навантажень (Zero-Allocation/Pre-split path lookups),
+містить повну базу ключів-синонімів та Pydantic v2 валідацію.
 """
 
 import re
 import logging
-from functools import lru_cache
-from typing import Any, Optional, List, Dict
+from typing import Any, Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-logger = logging.getLogger("omniflow_engine")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Безпечний кортеж порожніх значень для перевірок
 EMPTY = (None, "", (), {}, "None", "null", "N/A", "n/a")
 
 CURRENCY_PREFIX = {
@@ -24,7 +21,7 @@ CURRENCY_PREFIX = {
 
 
 # ==========================================
-# 1. PYDANTIC SCHEMAS (Crash-Free Guarantee)
+# 1. PYDANTIC v2 SCHEMAS
 # ==========================================
 
 class OrderItem(BaseModel):
@@ -58,14 +55,14 @@ class UnifiedOrder(BaseModel):
     total_amount: Dict[str, Any] = Field(default_factory=dict, description="Загальна сума")
     items: List[OrderItem] = Field(default_factory=list, description="Список товарів")
     status: Dict[str, Any] = Field(default_factory=dict, description="Статус замовлення")
-    chat_history: str = Field(default="", description="Історія чату або діалогу")
+    chat_history: str = Field(default="", description="Історія чату")
 
 
 # ==========================================
-# 2. FULL STATIC FIELD SYNONYMS (Усі ключі для всіх магазинів)
+# 2. FIELD SYNONYMS (Pre-split для максимуму швидкості)
 # ==========================================
 
-FIELD_SYNONYMS = {
+RAW_FIELD_SYNONYMS = {
     "order_number": [
         "order_number", "orderNumber", "number", "name", "order_id", "id", 
         "order_no", "orderNo", "reference", "code", "invoice_no", "invoiceNumber",
@@ -194,6 +191,12 @@ FIELD_SYNONYMS = {
     ],
 }
 
+# PRE-SPLIT OPTIMIZATION: розбиваємо рядки на кортежі один раз під час завантаження модуля
+FIELD_SYNONYMS: Dict[str, List[Tuple[str, ...]]] = {
+    field: [tuple(path.split(".")) for path in paths]
+    for field, paths in RAW_FIELD_SYNONYMS.items()
+}
+
 
 class OrderAPIError(Exception):
     def __init__(self, message: str, status: int = 400):
@@ -208,16 +211,10 @@ def normalize_shop(raw: Any) -> Optional[str]:
     return value if value else None
 
 
-@lru_cache(maxsize=128)
-def _cached_split_path(path: Any) -> tuple:
-    if not isinstance(path, str):
-        path = str(path) if path is not None else ""
-    return tuple(path.split("."))
-
-
-def get_path(data: Any, path: str) -> Any:
+def get_path(data: Any, path_tuple: Tuple[str, ...]) -> Any:
+    """Швидкий обхід вкладеного JSON без зайвого split() завдяки pre-split кортежам."""
     current = data
-    for part in _cached_split_path(path):
+    for part in path_tuple:
         if isinstance(current, dict):
             current = current.get(part)
         elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
@@ -228,8 +225,8 @@ def get_path(data: Any, path: str) -> Any:
 
 
 def find(data: Any, field: str) -> Any:
-    for path in FIELD_SYNONYMS.get(field, []):
-        value = get_path(data, path)
+    for path_tuple in FIELD_SYNONYMS.get(field, []):
+        value = get_path(data, path_tuple)
         if value is not None:
             return value
     return None
@@ -306,38 +303,38 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
     currency = to_text(find(raw, "currency")) or "UAH"
 
-    # Прямий витяг з об'єктів WooCommerce (billing / shipping / customer)
     billing = raw.get("billing", {}) if isinstance(raw.get("billing"), dict) else {}
     shipping = raw.get("shipping", {}) if isinstance(raw.get("shipping"), dict) else {}
 
+    # Заздалегідь підготовлені pre-split шляхи для частих витягів
     first = (
         to_text(find(raw, "first_name")) 
-        or to_text(get_path(raw, "customer.first_name"))
+        or to_text(get_path(raw, ("customer", "first_name")))
         or to_text(billing.get("first_name"))
         or to_text(shipping.get("first_name"))
     )
     last = (
         to_text(find(raw, "last_name")) 
-        or to_text(get_path(raw, "customer.last_name"))
+        or to_text(get_path(raw, ("customer", "last_name")))
         or to_text(billing.get("last_name"))
         or to_text(shipping.get("last_name"))
     )
     customer_name = (
         " ".join(part for part in (first, last) if part) 
         or to_text(billing.get("company"))
-        or to_text(get_path(raw, "customer.name"))
+        or to_text(get_path(raw, ("customer", "name")))
         or to_text(find(raw, "customer_name"))
         or "Гість"
     )
 
     street = (
-        to_text(get_path(raw, "shipping_address.address1")) 
+        to_text(get_path(raw, ("shipping_address", "address1"))) 
         or to_text(find(raw, "street"))
         or to_text(shipping.get("address_1"))
         or to_text(billing.get("address_1"))
     )
     street2 = (
-        to_text(get_path(raw, "shipping_address.address2")) 
+        to_text(get_path(raw, ("shipping_address", "address2"))) 
         or to_text(find(raw, "street2"))
         or to_text(shipping.get("address_2"))
         or to_text(billing.get("address_2"))
@@ -345,25 +342,25 @@ def normalize_order(raw: dict, shop: str) -> dict:
     full_street = " ".join(part for part in (street, street2) if part) or string_address(raw)
 
     city = (
-        to_text(get_path(raw, "shipping_address.city")) 
+        to_text(get_path(raw, ("shipping_address", "city"))) 
         or to_text(find(raw, "city"))
         or to_text(shipping.get("city"))
         or to_text(billing.get("city"))
     )
     region = (
-        to_text(get_path(raw, "shipping_address.province")) 
+        to_text(get_path(raw, ("shipping_address", "province"))) 
         or to_text(find(raw, "region"))
         or to_text(shipping.get("state"))
         or to_text(billing.get("state"))
     )
     postal_code = (
-        to_text(get_path(raw, "shipping_address.zip")) 
+        to_text(get_path(raw, ("shipping_address", "zip"))) 
         or to_text(find(raw, "postal_code"))
         or to_text(shipping.get("postcode"))
         or to_text(billing.get("postcode"))
     )
     country = (
-        to_text(get_path(raw, "shipping_address.country")) 
+        to_text(get_path(raw, ("shipping_address", "country"))) 
         or to_text(find(raw, "country"))
         or to_text(shipping.get("country"))
         or to_text(billing.get("country"))
@@ -377,7 +374,7 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
     base_dict = {
         "shop": shop,
-        "id": to_text(get_path(raw, "id")) or to_text(find(raw, "order_number")),
+        "id": to_text(get_path(raw, ("id",))) or to_text(find(raw, "order_number")),
         "order_number": to_text(find(raw, "order_number")),
         "created_at": to_text(find(raw, "created_at")),
         "currency": currency.upper(),

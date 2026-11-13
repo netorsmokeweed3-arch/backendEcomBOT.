@@ -14,9 +14,7 @@ PROCESSING_QUEUE_NAME = "queue:shop_sync:processing"
 
 
 async def enqueue_shop_sync(shop_domain: str, user_id: int) -> bool:
-    """
-    Додає завдання на фонову синхронізацію магазину в кінець черги Redis (RPUSH).
-    """
+    """Додає завдання на фонову синхронізацію магазину в кінець черги Redis (RPUSH)."""
     client = await get_redis()
     if not client:
         logger.warning("Redis не налаштовано. Неможливо поставити задачу в чергу.")
@@ -38,8 +36,7 @@ async def enqueue_shop_sync(shop_domain: str, user_id: int) -> bool:
 
 
 async def dequeue_shop_sync(timeout: int = 5) -> Optional[Dict[str, Any]]:
-    """
-    Отримує завдання з черги за допомогою атомарного перенесення (BRPOPLPUSH)
+    """Отримує завдання з черги за допомогою атомарного перенесення (BRPOPLPUSH)
     у чергу обробки (processing), що гарантує збереження задачі при падінні воркера.
     """
     client = await get_redis()
@@ -47,10 +44,8 @@ async def dequeue_shop_sync(timeout: int = 5) -> Optional[Dict[str, Any]]:
         return None
     
     try:
-        # Атомарно витягуємо з основної черги і кидаємо в processing
         raw_data = await client.brpoplpush(QUEUE_NAME, PROCESSING_QUEUE_NAME, timeout=timeout)
         if raw_data:
-            # Зберігаємо сирий рядок усередині словника для подальшого ACK
             task = json.loads(raw_data)
             task["_raw_payload"] = raw_data
             return task
@@ -61,17 +56,13 @@ async def dequeue_shop_sync(timeout: int = 5) -> Optional[Dict[str, Any]]:
 
 
 async def ack_shop_sync(task: Dict[str, Any]) -> bool:
-    """
-    Підтвердження успішного виконання завдання (ACK) — видаляє його
-    з черги обробки (processing).
-    """
+    """Підтвердження успішного виконання завдання (ACK) — видаляє його з черги обробки (processing)."""
     client = await get_redis()
     if not client or "_raw_payload" not in task:
         return False
     
     try:
         raw_data = task["_raw_payload"]
-        # Видаляємо рівно 1 входження з processing queue
         await client.lrem(PROCESSING_QUEUE_NAME, 1, raw_data)
         logger.info(f"✅ [Queue] Завдання для магазину {task.get('shop')} успішно підтверджено (ACK).")
         return True

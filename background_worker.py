@@ -7,7 +7,7 @@
 import os
 import logging
 import asyncio
-import json as jsonlib
+import json
 from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from database import AsyncSessionLocal, PushTokenModel, StoreCredentialModel, AuditLogModel, OrderModel, OrderItemModel, decrypt_credential
 from redis_pool import get_redis
 from clients.dispatcher import MarketplaceDispatcher
-from worker_queue import dequeue_shop_sync
+from worker_queue import dequeue_shop_sync, ack_shop_sync
 from order_normalizer import OrderAPIError
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
             except (ValueError, TypeError):
                 total_amount = 0.0
 
-        raw_payload_str = jsonlib.dumps(raw, ensure_ascii=False)
+        raw_payload_str = json.dumps(raw, ensure_ascii=False)
 
         if existing_order:
             existing_order.customer_name = customer_name
@@ -129,10 +129,7 @@ async def save_orders_to_db(db, user_id: int, shop_domain: str, orders: list):
 
 
 async def acquire_distributed_lock(lock_key: str, expire_seconds: int = 300) -> bool:
-    """
-    Створює розподілене блокування в Redis (nx=True), щоб задачу виконав 
-    тільки один інстанс бекенду серед багатьох задеплоєних копій.
-    """
+    """Створює розподілене блокування в Redis (nx=True) для запобігання дублюванню завдань."""
     redis = await get_redis()
     if not redis:
         return True
@@ -146,9 +143,7 @@ async def acquire_distributed_lock(lock_key: str, expire_seconds: int = 300) -> 
 
 
 async def send_push_notification(title: str, body: str, data: dict = None, user_id: int = None) -> None:
-    """
-    Повністю асинхронна відправка Push-сповіщень через httpx.AsyncClient батчами по 100 шт.
-    """
+    """Повністю асинхронна відправка Push-сповіщень через httpx.AsyncClient батчами по 100 шт."""
     try:
         async with AsyncSessionLocal() as session:
             query = select(PushTokenModel)
@@ -160,7 +155,6 @@ async def send_push_notification(title: str, body: str, data: dict = None, user_
 
         valid_tokens = [t for t in tokens if t.startswith("ExponentPushToken")]
         if not valid_tokens:
-            logger.info("Немає зареєстрованих валідних Push-токенів для відправки.")
             return
 
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -179,20 +173,15 @@ async def send_push_notification(title: str, body: str, data: dict = None, user_
                 try:
                     response = await client.post(EXPO_PUSH_URL, json=batch)
                     logger.info(f"Push-батч ({len(batch)} шт.) відправлено: статус {response.status_code}")
-                except httpx.TimeoutException:
-                    logger.error("Таймаут при відправці Push-батчу")
                 except Exception as e:
-                    logger.error(f"Помилка відправки Push-батчу: {str(e)}")
+                    logger.error(f"Помилка відправки Push-батчу: {e}")
                     
     except Exception as e:
-        logger.error(f"Помилка при читанні Push-токенів з бази даних: {str(e)}")
+        logger.error(f"Помилка при читанні Push-токенів з бази даних: {e}")
 
 
 async def process_shop_sync_queue() -> None:
-    """
-    Фоновий воркер, який постійно слухає чергу sync-завдань із Redis за допомогою BRPOP,
-    збирає замовлення та фізично зберігає їх у базу даних.
-    """
+    """Фоновий воркер для слухання черги синхронізації з Redis та виклику ACK."""
     redis = await get_redis()
     if not redis:
         return
@@ -218,9 +207,10 @@ async def process_shop_sync_queue() -> None:
                         
                         if not store_cred:
                             logger.error(f"❌ Магазин {shop} не знайдено для користувача {user_id}")
+                            await ack_shop_sync(task)  # Підтверджуємо, щоб не забивати чергу
                             continue
                         
-                        credentials = jsonlib.loads(decrypt_credential(store_cred.encrypted_credentials))
+                        credentials = json.loads(decrypt_credential(store_cred.encrypted_credentials))
                         
                         store_config = {
                             "platform": store_cred.platform,
@@ -229,17 +219,13 @@ async def process_shop_sync_queue() -> None:
                             "last_synced_at": store_cred.last_synced_at.isoformat() if store_cred.last_synced_at else None
                         }
                         
-                        # 1. Запит до маркетплейсу через диспетчер
                         orders = await dispatcher.fetch_store_orders(store_config)
                         
-                        # 2. Реальне збереження замовлень у базу даних (критичний зв'язок)
                         if orders:
                             await save_orders_to_db(db, user_id, shop, orders)
                         
-                        # 3. Оновлення мітки останньої синхронізації
                         store_cred.last_synced_at = datetime.now(timezone.utc)
                         
-                        # 4. Логування успіху в аудит
                         db.add(AuditLogModel(
                             user_id=user_id,
                             shop_domain=shop,
@@ -248,6 +234,9 @@ async def process_shop_sync_queue() -> None:
                         ))
                         await db.commit()
                         logger.info(f"✅ Фонова синхронізація магазину {shop} успішно завершена! Завантажено замовлень: {len(orders)}")
+                        
+                    # Викликаємо ACK після успішного виконання
+                    await ack_shop_sync(task)
                         
                 except OrderAPIError as oae:
                     logger.error(f"❌ API помилка синхронізації для {shop}: {oae}")
@@ -259,8 +248,10 @@ async def process_shop_sync_queue() -> None:
                             message=str(oae)
                         ))
                         await db.commit()
+                    await ack_shop_sync(task)  # Підтверджуємо навіть при API помилці, щоб уникнути нескінченного циклу
                 except Exception as exc:
                     logger.error(f"❌ Критична помилка фонової синхронізації для {shop}: {exc}")
+                    # Помилка виконання — не робимо ACK одразу, щоб задача повернулась або аналізувалась
                     
         except asyncio.CancelledError:
             break
@@ -270,10 +261,7 @@ async def process_shop_sync_queue() -> None:
 
 
 async def background_store_monitor() -> None:
-    """
-    Головний асинхронний фоновий цикл: моніторинг магазинів, звітність 
-    та паралельний запуск обробника черги завдань.
-    """
+    """Головний фоновий цикл моніторингу та ранішніх/вечірніх звітів."""
     logger.info("Фоновий монітор магазинів запущено з підтримкою Distributed Lock! 🚀")
     
     sync_queue_task = asyncio.create_task(process_shop_sync_queue())
@@ -289,36 +277,26 @@ async def background_store_monitor() -> None:
                 current_minute = now.minute
                 current_date = now.date()
 
-                # --- 1. РАНКОВИЙ ЗВІТ (О 8:00-8:04 UTC з захистом від дрейфу) ---
                 if current_hour == 8 and current_minute < 5 and last_morning_report_day != current_date:
                     lock_key = f"lock:morning_report:{current_date}"
-                    
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
                         last_morning_report_day = current_date
-                        logger.info("Формування ранкового звіту за ніч (ексклюзивний воркер)...")
                         await send_push_notification(
                             "🌅 Ранковий звіт EcomBOT",
                             "Штучний інтелект перевірив підключені магазини. Все працює стабільно! ☕"
                         )
-                    else:
-                        logger.info("Ранковий звіт вже виконується іншим інстансом сервера. Пропускаємо.")
 
-                # --- 2. ВЕЧІРНІЙ ЗВІТ (О 21:00-21:04 UTC з захистом від дрейфу) ---
                 if current_hour == 21 and current_minute < 5 and last_evening_report_day != current_date:
                     lock_key = f"lock:evening_report:{current_date}"
-                    
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
                         last_evening_report_day = current_date
-                        logger.info("Формування вечірнього звіту (ексклюзивний воркер)...")
                         await send_push_notification(
                             "🌙 Вечірній підсумок EcomBOT",
                             "Підсумки дня: система працює в штатному режимі. Гарного відпочинку! 🛋️"
                         )
-                    else:
-                        logger.info("Вечірній звіт вже виконується іншим інстансом сервера. Пропускаємо.")
 
             except Exception as e:
-                logger.error(f"Помилка у фоновому воркері: {str(e)}")
+                logger.error(f"Помилка у фоновому воркері: {e}")
 
             await asyncio.sleep(60)
             
