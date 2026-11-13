@@ -1,3 +1,5 @@
+"""Модуль інтеграції з Prom.ua API v1 (Enterprise Edition)."""
+
 import logging
 from typing import List, Dict, Any
 from clients.base_client import BaseMarketplaceClient, OrderAPIError
@@ -38,7 +40,6 @@ class PromClient(BaseMarketplaceClient):
                     
                 all_orders.extend(orders)
                 
-                # Якщо замовлень повернулось менше ліміту — це була остання сторінка
                 if len(orders) < limit:
                     break
                     
@@ -49,5 +50,5 @@ class PromClient(BaseMarketplaceClient):
         except OrderAPIError:
             raise
         except Exception as e:
-            logger.error(f"Prom API critical error for {self.shop_domain}: {str(e)}")
-            raise OrderAPIError(f"Помилка зв'язку з Prom API: {str(e)}", 502)
+            logger.error(f"Prom API critical error for {self.shop_domain}: {e}")
+            raise OrderAPIError(f"Помилка зв'язку з Prom API: {e}", 502)

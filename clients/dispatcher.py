@@ -1,3 +1,5 @@
+"""Диспетчер маркетплейсів для паралельного збору замовлень та нормалізації (Enterprise Edition)."""
+
 import asyncio
 import logging
 import sys
@@ -63,7 +65,7 @@ class MarketplaceDispatcher:
             except OrderAPIError:
                 raise
             except Exception as e:
-                logger.error(f"Помилка збору замовлень з магазину {shop_domain}: {str(e)}")
+                logger.error(f"Помилка збору замовлень з магазину {shop_domain}: {e}")
                 return []
 
     async def fetch_all_user_stores(self, stores_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

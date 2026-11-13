@@ -1,3 +1,5 @@
+"""Модуль інтеграції з Rozetka Seller API (Enterprise Edition)."""
+
 import logging
 from typing import List, Dict, Any
 from clients.base_client import BaseMarketplaceClient, OrderAPIError
@@ -15,6 +17,7 @@ class RozetkaClient(BaseMarketplaceClient):
         
         all_orders = []
         page = 1
+        limit = 50
 
         try:
             while True:
@@ -37,8 +40,7 @@ class RozetkaClient(BaseMarketplaceClient):
                     
                 all_orders.extend(content)
                 
-                # Якщо розетка повертає менше ніж зазвичай за сторінку або порожньо — зупиняємось
-                if len(content) < 50:
+                if len(content) < limit:
                     break
                     
                 page += 1
@@ -48,6 +50,5 @@ class RozetkaClient(BaseMarketplaceClient):
         except OrderAPIError:
             raise
         except Exception as e:
-            logger.error(f"Rozetka API critical error for {self.shop_domain}: {str(e)}")
-            raise OrderAPIError(f"Помилка зв'язку з Rozetka API: {str(e)}", 502)
-
+            logger.error(f"Rozetka API critical error for {self.shop_domain}: {e}")
+            raise OrderAPIError(f"Помилка зв'язку з Rozetka API: {e}", 502)

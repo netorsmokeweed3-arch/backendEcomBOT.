@@ -1,3 +1,7 @@
+"""Модуль інтеграції з WooCommerce REST API v3 (Enterprise Edition).
+Підтримує інкрементальну синхронізацію та пагінацію.
+"""
+
 import logging
 from typing import List, Dict, Any
 from clients.base_client import BaseMarketplaceClient, OrderAPIError
@@ -51,5 +55,5 @@ class WooCommerceClient(BaseMarketplaceClient):
         except OrderAPIError:
             raise
         except Exception as e:
-            logger.error(f"Помилка запиту до WooCommerce {self.shop_domain}: {str(e)}")
-            raise OrderAPIError(f"Не вдалося отримати замовлення з WooCommerce: {str(e)}", 502)
+            logger.error(f"Помилка запиту до WooCommerce {self.shop_domain}: {e}")
+            raise OrderAPIError(f"Не вдалося отримати замовлення з WooCommerce: {e}", 502)

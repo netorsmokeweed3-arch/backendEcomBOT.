@@ -46,8 +46,7 @@ class ShopifyClient(BaseMarketplaceClient):
                 if isinstance(orders, list) and orders:
                     all_orders.extend(orders)
 
-                # Пошук наступної сторінки в заголовку Link (курсорна пагінація Shopify)
-                # Приклад: <https://shop.myshopify.com/admin/api/2024-10/orders.json?page_info=...>; rel="next"
+                # Курсорна пагінація Shopify через заголовок Link
                 link_header = response.headers.get("Link", "")
                 next_url = None
                 if link_header:
