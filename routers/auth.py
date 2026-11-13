@@ -16,8 +16,10 @@ import jwt
 import bcrypt
 
 from database import AsyncSessionLocal, get_db, UserModel
-from server import (
-    JWT_SECRET_KEY, JWT_ALGORITHM, JWT_ACCESS_EXPIRATION_MINUTES, JWT_REFRESH_EXPIRATION_DAYS,
+from config import (
+    JWT_SECRET_KEY, JWT_ALGORITHM, JWT_ACCESS_EXPIRATION_MINUTES, JWT_REFRESH_EXPIRATION_DAYS
+)
+from deps import (
     security_scheme, check_rate_limit, get_current_user_id, get_redis
 )
 

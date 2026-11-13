@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, Field
 
+from config import WEBHOOK_SECRET
 from database import (
     AsyncSessionLocal, get_db, ChatModeModel, PushTokenModel, 
     AuditLogModel, StoreCredentialModel
@@ -21,9 +22,8 @@ from order_normalizer import normalize_shop, normalize_order
 from nova_poshta import get_nova_poshta_tracking
 from ukrposhta import get_ukrposhta_tracking
 from background_worker import save_orders_to_db
-from server import (
-    BACKEND_VERSION, WEBHOOK_SECRET, check_rate_limit, get_current_user_id
-)
+from config import BACKEND_VERSION, WEBHOOK_SECRET
+from deps import check_rate_limit, get_current_user_id
 
 logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from database import get_db, StoreCredentialModel, OrderModel
 from order_normalizer import normalize_shop
-from server import get_current_user_id, check_rate_limit
+from deps import get_current_user_id, check_rate_limit
 
 logger = logging.getLogger(__name__)
 

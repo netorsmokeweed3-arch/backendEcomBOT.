@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from database import get_db, StoreCredentialModel, encrypt_credential
 from order_normalizer import normalize_shop
-from server import get_current_user_id
+from deps import get_current_user_id
 
 logger = logging.getLogger(__name__)
 
