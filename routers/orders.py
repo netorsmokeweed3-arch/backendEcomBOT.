@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from database import get_db, StoreCredentialModel, OrderModel, AuditLogModel
 from order_normalizer import normalize_shop, normalize_order_async
 from redis_pool import get_redis
-from background_worker import save_orders_to_db
+from worker import save_orders_to_db
 from config import WEBHOOK_SECRET
 from deps import get_current_user_id, check_rate_limit
 
@@ -34,7 +34,6 @@ MAX_WEBHOOK_SIZE_BYTES = 512 * 1024
 class VerifyWebhookSignature:
     """Інкапсульована перевірка HMAC-SHA256 підпису вебхуків із захистом від переповнення пам'яті (DoS)."""
     async def __call__(self, request: Request, x_webhook_signature: Optional[str] = Header(None)) -> bytes:
-        # Перевірка заголовка Content-Length для захисту від великих payload
         content_length = request.headers.get("content-length")
         if content_length and int(content_length) > MAX_WEBHOOK_SIZE_BYTES:
             logger.warning(f"Спроба атаки великим payload: {content_length} байтів")
@@ -151,10 +150,10 @@ async def receive_marketplace_webhook(
             raw_order = payload.get("order") or payload
             
             if isinstance(raw_order, dict) and raw_order:
-                # 🚀 ОРКЕСТРАЦІЯ КОНВЕЄРА: Асинхронна нормалізація з Self-Healing та Супервізором
+                # 🚀 ОРКЕСТРАЦІЯ КОНВЕЄРА: Асинхронна нормалізація з Self-Healing
                 normalized_order_data = await normalize_order_async(raw_order, normalized_shop_domain, platform_key)
                 
-                # Зберігаємо нормалізоване замовлення в БД
+                # Зберігаємо нормалізоване замовлення в БД через єдиний воркер
                 await save_orders_to_db(db, user_id, normalized_shop_domain, [normalized_order_data])
             
             db.add(AuditLogModel(

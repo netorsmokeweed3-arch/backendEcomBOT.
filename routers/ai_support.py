@@ -20,7 +20,7 @@ from agents import MultiAgentSystem
 from order_normalizer import normalize_shop, normalize_order
 from nova_poshta import get_nova_poshta_tracking
 from ukrposhta import get_ukrposhta_tracking
-from background_worker import save_orders_to_db
+from worker import save_orders_to_db
 from config import BACKEND_VERSION, WEBHOOK_SECRET
 from deps import check_rate_limit, get_current_user_id
 
@@ -82,40 +82,6 @@ class PushTokenSchema(BaseModel):
 @router.get("/", status_code=status.HTTP_200_OK, tags=["System"])
 async def root() -> Dict[str, str]:
     return {"message": f"OmniFlow Enterprise SaaS Backend is running! (v: {BACKEND_VERSION}) 🚀"}
-
-
-@router.get("/health", status_code=status.HTTP_200_OK, tags=["System"])
-async def health_check() -> JSONResponse:
-    checks = {"api": "ok", "database": "unknown", "redis": "unknown"}
-    
-    try:
-        async with AsyncSessionLocal() as db:
-            await db.scalar(select(1))
-        checks["database"] = "ok"
-    except Exception as e:
-        logger.error(f"Health check DB error: {e}")
-        checks["database"] = "error"
-    
-    redis = await get_redis()
-    if redis:
-        try:
-            await redis.ping()
-            checks["redis"] = "ok"
-        except Exception as e:
-            logger.error(f"Health check Redis error: {e}")
-            checks["redis"] = "error"
-    else:
-        checks["redis"] = "not_configured"
-        
-    status_code = status.HTTP_200_OK if checks["database"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE
-    return JSONResponse(
-        status_code=status_code, 
-        content={
-            "status": "healthy" if status_code == 200 else "degraded",
-            "version": BACKEND_VERSION,
-            "checks": checks
-        }
-    )
 
 
 @router.post("/api/tracking", status_code=status.HTTP_200_OK, tags=["Logistics"])
@@ -253,7 +219,7 @@ async def support_and_returns(
     payload: SupportSchema, 
     user_id: int = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
-    """Обробка скарг та запитів підтримки за допомогою агента (синтаксис виправлено)."""
+    """Обробка скарг та запитів підтримки за допомогою агента."""
     if not await check_rate_limit(f"user:{user_id}:support", max_requests=20):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Перевищено ліміт запитів.")
 

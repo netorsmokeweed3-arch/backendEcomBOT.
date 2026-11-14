@@ -87,7 +87,7 @@ class OrderNormalizer:
         }
 
     async def normalize_async(self, platform: str, raw_data: dict) -> dict:
-        """Асинхронна нормалізація з інтегрованим AI Self-Healing та перевіркою Супервізором."""
+        """Асинхронна нормалізація з інтегрованим AI Self-Healing, версіонованим кешем Redis та Супервізором."""
         platform_key = platform.lower()
         adapter = self._adapters.get(platform_key)
         
@@ -105,15 +105,20 @@ class OrderNormalizer:
             redis = await get_redis()
             for key in unknown_keys:
                 sample_val = raw_data.get(key)
-                cache_mapping_key = f"self_heal:{platform_key}:{key}"
+                
+                # 🚀 Версіонований ключ кешу в Redis (v1) із захистом від застарілих даних
+                cache_mapping_key = f"self_heal:v1:{platform_key}:{key}"
                 
                 standard_field = None
                 
                 # Перевіряємо Redis-кеш мапінгів
                 if redis:
-                    cached_field = await redis.get(cache_mapping_key)
-                    if cached_field:
-                        standard_field = cached_field.decode('utf-8') if isinstance(cached_field, bytes) else cached_field
+                    try:
+                        cached_field = await redis.get(cache_mapping_key)
+                        if cached_field:
+                            standard_field = cached_field.decode('utf-8') if isinstance(cached_field, bytes) else str(cached_field)
+                    except Exception as redis_err:
+                        logger.warning(f"⚠️ Помилка читання self-heal кешу з Redis для ключа '{key}': {redis_err}")
 
                 # Якщо в кеші немає — запитуємо Агента 5 (Self-Healing)
                 if not standard_field:
@@ -147,9 +152,12 @@ class OrderNormalizer:
                         elif confidence < 0.5:
                             standard_field = None
 
-                        # Якщо мапінг успішно підтверджено — кешуємо в Redis на 30 днів (2592000 сек)
+                        # Якщо мапінг успішно підтверджено — кешуємо в Redis на 7 днів (604800 сек)
                         if standard_field and redis:
-                            await redis.set(cache_mapping_key, standard_field, ex=2592000)
+                            try:
+                                await redis.set(cache_mapping_key, standard_field, ex=604800)
+                            except Exception as redis_set_err:
+                                logger.warning(f"⚠️ Помилка запису self-heal кешу в Redis: {redis_set_err}")
 
                 # Застосовуємо знайдене поле до нормалізованих даних
                 if standard_field and standard_field in normalized_data:

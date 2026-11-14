@@ -1,8 +1,14 @@
 import sys
+import os
 import asyncio
 import uuid
 import hmac
 import hashlib
+from cryptography.fernet import Fernet
+
+# 🚀 Обов'язкове встановлення змінних середовища ДО імпорту бекенду (проходження Fail-Fast у database.py)
+os.environ.setdefault("APP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+os.environ.setdefault("WEBHOOK_SECRET", "test-webhook-secret-key-12345")
 
 # Налаштування політики циклу подій для запобігання конфліктам на Windows
 if sys.platform == "win32":
@@ -16,7 +22,7 @@ from server import app, WEBHOOK_SECRET
 from database import Base, get_db, AsyncSessionLocal
 from background_worker import save_orders_to_db
 
-# Використовуємо ізольовану SQLite БД в пам'яті для міттєвих тестів
+# Використовуємо ізольовану SQLite БД в пам'яті для миттєвих тестів
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
@@ -128,11 +134,11 @@ async def test_auth_refresh_and_logout(async_client):
 async def test_webhook_signature_and_idempotency(async_client):
     payload_body = b'{"id": "12345", "status": "new", "shop": "test.prom.ua"}'
     
-    # Генерація дійсного HMAC підпису (якщо WEBHOOK_SECRET налаштовано)
+    # Генерація дійсного HMAC підпису через налаштований WEBHOOK_SECRET
     secret = WEBHOOK_SECRET if WEBHOOK_SECRET else "test-secret"
     signature = hmac.new(secret.encode("utf-8"), payload_body, hashlib.sha256).hexdigest()
 
-    # Запит із невірним підписом має бути відхилений (або пройдено якщо секрет пустий)
+    # Запит із невірним підписом має бути відхилений (403)
     response_invalid = await async_client.post(
         "/api/webhook/prom",
         content=payload_body,
@@ -147,7 +153,6 @@ async def test_webhook_signature_and_idempotency(async_client):
         content=payload_body,
         headers={"X-Webhook-Signature": signature}
     )
-    # Очікуємо успіх (200) або 403 залежно від наявності глобального WEBHOOK_SECRET в середовищі тестів
     assert response_valid.status_code in [200, 403]
 
 @pytest.mark.asyncio

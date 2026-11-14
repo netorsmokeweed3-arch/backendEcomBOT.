@@ -1,12 +1,15 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
+from sqlalchemy import select
 
 from config import BACKEND_VERSION
-from deps import set_redis_client
+from deps import set_redis_client, get_redis
+from database import AsyncSessionLocal
 
 # Налаштування структурованого логування
 logging.basicConfig(
@@ -36,7 +39,7 @@ async def lifespan(app: FastAPI):
         logger.info("З'єднання з Redis успішно закрито.")
 
 
-# Створення основного FastAPI додатку (Enterprise Core)
+# Створення основного FastAPI додатку (Enterprise Core)[cite: 18]
 app = FastAPI(
     title="Enterprise Marketplace Core API",
     version=BACKEND_VERSION,
@@ -53,6 +56,42 @@ app.add_middleware(
 )
 
 
+# --- ЄДИНИЙ КОМПЛЕКСНИЙ HEALTH CHECK ---
+@app.get("/health", status_code=status.HTTP_200_OK, tags=["System"])
+async def health_check() -> JSONResponse:
+    """Детальна перевірка здоров'я підсистем ШІ, бази даних та Redis."""
+    checks = {"api": "ok", "database": "unknown", "redis": "unknown"}
+    
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.scalar(select(1))
+        checks["database"] = "ok"
+    except Exception as e:
+        logger.error(f"Health check DB error: {e}")
+        checks["database"] = "error"
+    
+    redis = await get_redis()
+    if redis:
+        try:
+            await redis.ping()
+            checks["redis"] = "ok"
+        except Exception as e:
+            logger.error(f"Health check Redis error: {e}")
+            checks["redis"] = "error"
+    else:
+        checks["redis"] = "not_configured"
+        
+    status_code = status.HTTP_200_OK if checks["database"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(
+        status_code=status_code, 
+        content={
+            "status": "healthy" if status_code == 200 else "degraded",
+            "version": BACKEND_VERSION,
+            "checks": checks
+        }
+    )
+
+
 # --- ПІДКЛЮЧЕННЯ РОУТЕРІВ ---
 from routers.auth import router as auth_router
 from routers.stores import router as stores_router
@@ -63,9 +102,3 @@ app.include_router(auth_router)
 app.include_router(stores_router)
 app.include_router(orders_router)
 app.include_router(ai_support_router)
-
-
-@app.get("/health", tags=["System"])
-async def health_check():
-    """Перевірка стану мікросервісу."""
-    return {"status": "healthy", "service": "active", "version": BACKEND_VERSION}
