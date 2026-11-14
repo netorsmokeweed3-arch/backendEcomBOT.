@@ -20,7 +20,7 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from server import app, WEBHOOK_SECRET
 from database import Base, get_db, AsyncSessionLocal
-from background_worker import save_orders_to_db
+from worker import save_orders_to_db
 
 # Використовуємо ізольовану SQLite БД в пам'яті для миттєвих тестів
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
