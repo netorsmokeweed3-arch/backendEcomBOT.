@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, Field
 
-from config import WEBHOOK_SECRET
 from database import (
     AsyncSessionLocal, get_db, ChatModeModel, PushTokenModel, 
     AuditLogModel, StoreCredentialModel

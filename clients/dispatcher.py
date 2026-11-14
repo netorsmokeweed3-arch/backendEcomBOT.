@@ -22,6 +22,31 @@ from clients.prom_client import PromClient
 from clients.rozetka_client import RozetkaClient
 from clients.woocommerce_client import WooCommerceClient
 from clients.shopify_client import ShopifyClient
+from clients.olx_client import OlxClient  # <-- Додано імпорт OLX
+
+# Імпорт решти публічних, enterprise та ритейл-клієнтів
+from retail_scrapers.artline_client import ArtlineClient
+from retail_scrapers.brain_client import BrainClient
+from clients.enterprise.citrus_client import CitrusClient
+from retail_scrapers.click_client import ClickClient
+from clients.enterprise.comfy_client import ComfyClient
+from clients.crafta_client import CraftaClient
+from clients.enterprise.eldorado_client import EldoradoClient
+from retail_scrapers.elmir_client import ElmirClient
+from clients.epicentr_client import EpicentrClient
+from retail_scrapers.exe_client import ExeClient
+from clients.enterprise.foxtrot_client import FoxtrotClient
+from clients.horoshop_client import HoroshopClient
+from clients.izi_client import IziClient
+from clients.keycrm_client import KeyCrmClient
+from clients.kidstaff_client import KidstaffClient
+from retail_scrapers.kv_client import KvClient
+from clients.enterprise.moyo_client import MoyoClient
+from clients.remonline_client import RemonlineClient
+from clients.shafa_client import ShafaClient
+from clients.sqsp_client import SqspClient
+from retail_scrapers.telemart_client import TelemartClient
+from clients.weblium_client import WebliumClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +55,44 @@ class MarketplaceDispatcher:
         self.semaphore = asyncio.Semaphore(max_concurrent)
 
     def _get_client(self, platform: str, shop_domain: str, credentials: Dict[str, Any], last_synced_at: str = None):
-        """Фабрика створення клієнта з передачею інкрементальної мітки часу."""
         p = platform.lower()
-        if "prom" in p:
-            return PromClient(shop_domain, credentials, last_synced_at=last_synced_at)
-        elif "rozetka" in p:
-            return RozetkaClient(shop_domain, credentials, last_synced_at=last_synced_at)
-        elif "woo" in p or "wordpress" in p:
-            return WooCommerceClient(shop_domain, credentials, last_synced_at=last_synced_at)
-        elif "shopify" in p:
-            return ShopifyClient(shop_domain, credentials, last_synced_at=last_synced_at)
         
+        registry = {
+            "prom": PromClient,
+            "rozetka": RozetkaClient,
+            "woo": WooCommerceClient,
+            "woocommerce": WooCommerceClient,
+            "shopify": ShopifyClient,
+            "olx": OlxClient,  # <-- Зареєстровано OLX у словнику
+            "artline": ArtlineClient,
+            "brain": BrainClient,
+            "citrus": CitrusClient,
+            "click": ClickClient,
+            "comfy": ComfyClient,
+            "crafta": CraftaClient,
+            "eldorado": EldoradoClient,
+            "elmir": ElmirClient,
+            "epicentr": EpicentrClient,
+            "exe": ExeClient,
+            "foxtrot": FoxtrotClient,
+            "horoshop": HoroshopClient,
+            "izi": IziClient,
+            "keycrm": KeyCrmClient,
+            "kidstaff": KidstaffClient,
+            "kv": KvClient,
+            "moyo": MoyoClient,
+            "remonline": RemonlineClient,
+            "shafa": ShafaClient,
+            "sqsp": SqspClient,
+            "squarespace": SqspClient,
+            "telemart": TelemartClient,
+            "weblium": WebliumClient,
+        }
+
+        for key, client_cls in registry.items():
+            if key in p:
+                return client_cls(shop_domain, credentials, last_synced_at=last_synced_at)
+
         logger.warning(f"Невідома платформа для клієнта: {platform}")
         raise OrderAPIError(f"Платформа «{platform}» не підтримується.", 400)
 

@@ -1,12 +1,24 @@
 """Універсальний обробник замовлень для SaaS-платформи (Enterprise Edition).
-Оптимізовано для високих навантажень (Zero-Allocation/Pre-split path lookups),
-містить повну базу ключів-синонімів та Pydantic v2 валідацію.
+Архітектура на базі паттерну Адаптер, Pydantic v2 та AI Self-Healing з Агентом-Супервізором.
 """
 
 import re
 import logging
+import json
 from typing import Any, Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# Імпортуємо наші адаптери з папки adapters/
+from adapters.prom import PromAdapter
+from adapters.shopify import ShopifyAdapter
+from adapters.horoshop import HoroshopAdapter
+from adapters.keycrm import KeyCrmAdapter
+from adapters.remonline import RemonlineAdapter
+from adapters.epicentr import EpicentrAdapter
+
+# Імпортуємо систему агентів та Redis для кешування мапінгів
+from agents import MultiAgentSystem
+from redis_pool import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -59,143 +71,94 @@ class UnifiedOrder(BaseModel):
 
 
 # ==========================================
-# 2. FIELD SYNONYMS (Pre-split для максимуму швидкості)
+# 2. ORDER NORMALIZER COORDINATOR (AI Self-Healing & Telemetry)
 # ==========================================
 
-RAW_FIELD_SYNONYMS = {
-    "order_number": [
-        "order_number", "orderNumber", "number", "name", "order_id", "id", 
-        "order_no", "orderNo", "reference", "code", "invoice_no", "invoiceNumber",
-        "order_reference", "external_id", "externalId", "display_number", "displayNumber",
-        "order_code", "orderCode", "increment_id", "incrementId", "num", "order_num",
-        "zakaz_id", "nomer_zakazu", "nomer", "transaction_id", "transactionId", "order_index",
-        "order.id", "order.number", "order.name", "attributes.number", "data.id", "data.order_number"
-    ],
-    "created_at": [
-        "created_at", "createdAt", "date_created", "date", "created", 
-        "order_date", "date_added", "timestamp", "inserted_at", "processed_at",
-        "processedAt", "date_modified", "updated_at", "updatedAt", "date_purchased",
-        "order.created_at", "order.date", "attributes.created_at", "data.created_at"
-    ],
-    "customer_name": [
-        "customer.full_name", "customer.fullName", "customer.name", "customer_name", "customerName",
-        "client_name", "buyer_name", "full_name", "fullName", "buyer.full_name",
-        "buyer.name", "client.name", "recipient_name", "shipping_address.name", "shippingAddress.name",
-        "billing_address.name", "billingAddress.name", "shipping_name", "billing_name",
-        "contact_name", "contactName", "receiver", "recipient", "pib", "fio"
-    ],
-    "first_name": [
-        "billing.first_name", "shipping.first_name", "customer.first_name", "customer.firstName", 
-        "buyer.first_name", "client.first_name", "shipping_address.first_name", "shippingAddress.first_name", 
-        "billing_address.first_name", "billingAddress.first_name", "client_first_name", "first_name", 
-        "firstName", "fname", "given_name", "givenName", "imya"
-    ],
-    "last_name": [
-        "billing.last_name", "shipping.last_name", "customer.last_name", "customer.lastName", 
-        "buyer.last_name", "client.last_name", "shipping_address.last_name", "shippingAddress.last_name", 
-        "billing_address.last_name", "billingAddress.last_name", "client_last_name", "last_name", 
-        "lastName", "lname", "surname", "family_name", "prizvyshche"
-    ],
-    "phone": [
-        "billing.phone", "shipping.phone", "shipping_address.phone", "shippingAddress.phone", 
-        "delivery_address.phone", "customer.phone", "buyer.phone", "client.phone", "phone",
-        "billing_address.phone", "billingAddress.phone", "delivery.phone", "telephone", 
-        "phone_number", "phoneNumber", "contact_phone", "client_phone", "mobile", "cellphone"
-    ],
-    "email": [
-        "billing.email", "shipping.email", "email", "customer.email", "buyer.email", "client.email", 
-        "shipping_address.email", "shippingAddress.email", "billing_address.email", "billingAddress.email", 
-        "client_email", "customer_email", "mail", "contact_email", "contactEmail", "customer.mail", "e_mail"
-    ],
-    "street": [
-        "billing.address_1", "shipping.address_1", "shipping_address.address1", "shippingAddress.address1", 
-        "delivery_address.street", "deliveryAddress.street", "delivery.address", "address1", "address", "street", 
-        "shipping_address.street", "billing_address.address1", "billingAddress.address1", "line1"
-    ],
-    "street2": [
-        "billing.address_2", "shipping.address_2", "shipping_address.address2", "shippingAddress.address2", 
-        "delivery_address.address2", "deliveryAddress.address2", "address2", "apartment", "apt", "suite", "unit", 
-        "billing_address.address2", "billingAddress.address2", "line2", "building", "house"
-    ],
-    "city": [
-        "billing.city", "shipping.city", "shipping_address.city", "shippingAddress.city", "delivery_address.city",
-        "deliveryAddress.city", "delivery.city", "city", "billing_address.city", "billingAddress.city", 
-        "town", "locality", "municipality", "settlement", "misto", "naselenyy_punkt", "gorod"
-    ],
-    "region": [
-        "billing.state", "shipping.state", "shipping_address.province", "shipping_address.state", "delivery_address.region",
-        "deliveryAddress.region", "province", "region", "state", "billing_address.province", 
-        "billingAddress.province", "territory", "county", "oblast", "area"
-    ],
-    "postal_code": [
-        "billing.postcode", "shipping.postcode", "shipping_address.zip", "shipping_address.postal_code", "delivery_address.postal_code",
-        "deliveryAddress.postal_code", "zip", "postal_code", "postcode", "zip_code", 
-        "zipCode", "billing_address.zip", "billingAddress.zip"
-    ],
-    "country": [
-        "billing.country", "shipping.country", "shipping_address.country", "delivery_address.country", "country_name", 
-        "country", "billing_address.country", "billingAddress.country", "country_code"
-    ],
-    "delivery_method": [
-        "delivery_method", "shipping_lines.0.title", "delivery_option.name", "delivery.title",
-        "shipping_method", "shippingMethod", "carrier", "shipping_title", "shipping_description",
-        "shipping_lines", "shipping_line", "delivery_service", "deliveryService", "metod_dostavky"
-    ],
-    "currency": [
-        "currency", "presentment_currency", "currency_code", "order_currency", "currencyCode",
-        "total_price_set.shop_money.currency_code", "valyuta", "val", "iso_currency_code"
-    ],
-    "total_amount": [
-        "total_price", "current_total_price", "total_amount", "totalAmount", "total",
-        "total_price_set.shop_money.amount", "price", "amount",
-        "grand_total", "order_total", "sum", "subtotal", "total_sum", "suma", "v_vsogo", "itog"
-    ],
-    "items": [
-        "line_items", "items", "products", "goods", "order_items", "lineItems", "orderlines",
-        "tovary", "poziciyi", "cart_items", "contents", "order_lines", "purchased_items"
-    ],
-    "item_title": [
-        "title", "name", "product_name", "productName", "item_name", "label", "product_title",
-        "nazva", "naimenuvannia", "description", "item_description", "nazvanie_tovara"
-    ],
-    "item_variant": [
-        "variant_title", "variant", "size", "options", "variant_name", "attribute", "properties",
-        "modifikatsiya", "opcija", "parametr", "item_options", "product_options", "variation"
-    ],
-    "item_sku": [
-        "sku", "article", "code", "product_sku", "item_code", "productSku", "itemCode",
-        "artikul", "art", "product_code", "productCode", "model", "vendor_code"
-    ],
-    "item_quantity": [
-        "quantity", "qty", "count", "amount", "pieces", "k-st", "kilkist", "kol", "item_qty",
-        "product_quantity", "item_quantity", "number_of_items", "item_count", "kolichestvo"
-    ],
-    "item_price": [
-        "price", "unit_price", "cost", "item_price", "regular_price", "unitPrice", "price_set",
-        "tsina", "vartist_odynytsi", "item_cost", "product_price", "sale_price", "base_price"
-    ],
-    "item_line_total": [
-        "line_total", "lineTotal", "total", "final_line_price", "subtotal", "row_total",
-        "suma_pozytsii", "total_price", "row_sum", "item_total", "itemTotal", "line_sum"
-    ],
-    "item_id": [
-        "id", "line_item_id", "product_id", "item_id", "variant_id", "productId", "lineItemId"
-    ],
-    "status": [
-        "status", "fulfillment_status", "financial_status", "status_name", "order_status", 
-        "fulfillmentStatus", "financialStatus", "orderStatus", "stan", "stan_zamovlennya"
-    ],
-    "cancelled": [
-        "cancelled_at", "is_cancelled", "canceled", "cancelled", "isCancelled", "cancel_reason",
-        "skasovano", "is_canceled", "is_active", "order_cancelled", "is_deleted", "deleted"
-    ],
-}
+class OrderNormalizer:
+    def __init__(self):
+        # Повний реєстр платформ та їхніх адаптерів
+        self._adapters = {
+            "prom": PromAdapter(),
+            "shopify": ShopifyAdapter(),
+            "horoshop": HoroshopAdapter(),
+            "keycrm": KeyCrmAdapter(),
+            "remonline": RemonlineAdapter(),
+            "epicentr": EpicentrAdapter(),
+        }
 
-# PRE-SPLIT OPTIMIZATION: розбиваємо рядки на кортежі один раз під час завантаження модуля
-FIELD_SYNONYMS: Dict[str, List[Tuple[str, ...]]] = {
-    field: [tuple(path.split(".")) for path in paths]
-    for field, paths in RAW_FIELD_SYNONYMS.items()
-}
+    async def normalize_async(self, platform: str, raw_data: dict) -> dict:
+        """Асинхронна нормалізація з інтегрованим AI Self-Healing та перевіркою Супервізором."""
+        platform_key = platform.lower()
+        adapter = self._adapters.get(platform_key)
+        
+        if not adapter:
+            logger.warning(f"⚠️ Немає зареєстрованого адаптера для платформи '{platform}'. Використовується шлях без адаптації.")
+            return raw_data if isinstance(raw_data, dict) else {}
+
+        # 1. Виконуємо первинну нормалізацію через адаптер
+        normalized_data, unknown_keys = adapter.normalize(raw_data, platform_key)
+
+        # 2. Якщо виявлено дрейф схем (unknown_keys) — запускаємо AI Self-Healing з Агентом 5 та Агентом 6
+        if unknown_keys:
+            logger.warning(f"🚨 [API Schema Drift] Платформа '{platform}' повернула нові невідомі поля: {unknown_keys}")
+            
+            redis = await get_redis()
+            for key in unknown_keys:
+                sample_val = raw_data.get(key)
+                cache_mapping_key = f"self_heal:{platform_key}:{key}"
+                
+                standard_field = None
+                
+                # Перевіряємо Redis-кеш мапінгів
+                if redis:
+                    cached_field = await redis.get(cache_mapping_key)
+                    if cached_field:
+                        standard_field = cached_field.decode('utf-8') if isinstance(cached_field, bytes) else cached_field
+
+                # Якщо в кеші немає — запитуємо Агента 5 (Self-Healing)
+                if not standard_field:
+                    heal_res = await MultiAgentSystem.run_self_healing_agent(key, sample_val, platform_key)
+                    standard_field = heal_res.get("standard_field")
+                    confidence = float(heal_res.get("confidence", 0.0))
+                    
+                    if standard_field:
+                        # Сеньйорська логіка: Зелена зона (>= 0.85) довіряємо одразу
+                        if confidence < 0.85 and confidence >= 0.5:
+                            # Жовта зона (0.5 - 0.85) — залучаємо Агента-Супервізора (Агента 6)
+                            logger.info(f"⚠️ [Supervisor Review] Поле '{key}' має середню впевненість {confidence}. Запуск Супервізора...")
+                            review_context = {
+                                "platform": platform_key,
+                                "unknown_key": key,
+                                "sample_value": sample_val,
+                                "suggested_mapping": standard_field,
+                                "initial_confidence": confidence
+                            }
+                            verdict = await MultiAgentSystem.run_supervisor_agent(
+                                task_context="Validate API Field Self-Healing Mapping",
+                                data_to_review=review_context
+                            )
+                            
+                            if verdict.get("approved") is True:
+                                standard_field = verdict.get("corrected_field") or standard_field
+                                logger.info(f"🛡️ [Supervisor Approved] Мапінг підтверджено для '{key}' -> '{standard_field}'")
+                            else:
+                                logger.error(f"❌ [Supervisor Rejected] Мапінг відхилено: {verdict.get('reason')}")
+                                standard_field = None
+                        elif confidence < 0.5:
+                            standard_field = None
+
+                        # Якщо мапінг успішно підтверджено — кешуємо в Redis на 30 днів (2592000 сек)
+                        if standard_field and redis:
+                            await redis.set(cache_mapping_key, standard_field, ex=2592000)
+
+                # Застосовуємо знайдене поле до нормалізованих даних
+                if standard_field and standard_field in normalized_data:
+                    normalized_data[standard_field] = sample_val
+
+        return normalized_data
+
+# Глобальний екземпляр нормалізатора
+_normalizer = OrderNormalizer()
 
 
 class OrderAPIError(Exception):
@@ -224,8 +187,13 @@ def get_path(data: Any, path_tuple: Tuple[str, ...]) -> Any:
     return None if current in EMPTY else current
 
 
-def find(data: Any, field: str) -> Any:
-    for path_tuple in FIELD_SYNONYMS.get(field, []):
+def find(data: Any, field: str, platform: str = "prom") -> Any:
+    """Шукає поле через адаптер відповідної платформи."""
+    adapter = _normalizer._adapters.get(platform.lower())
+    if not adapter:
+        return None
+    
+    for path_tuple in adapter.get_field_paths(field):
         value = get_path(data, path_tuple)
         if value is not None:
             return value
@@ -261,25 +229,25 @@ def money(amount: Any, currency: str) -> dict:
     return {"amount": value, "currency": code, "formatted": formatted}
 
 
-def normalize_items(raw_items: Any, currency: str) -> list:
+def normalize_items(raw_items: Any, currency: str, platform: str) -> list:
     items = []
     if not isinstance(raw_items, list):
         return items
     for item in raw_items:
         if not isinstance(item, dict):
             continue
-        title = to_text(find(item, "item_title")) or "Товар"
-        variant = to_text(find(item, "item_variant"))
+        title = to_text(find(item, "item_title", platform)) or "Товар"
+        variant = to_text(find(item, "item_variant", platform))
         if variant and variant.lower() != "default title":
             title = f"{title} ({variant})"
-        quantity_value = to_number(find(item, "item_quantity"))
+        quantity_value = to_number(find(item, "item_quantity", platform))
         quantity = int(quantity_value) if quantity_value and quantity_value > 0 else 1
-        unit_price = to_number(find(item, "item_price")) or 0.0
-        line_total = to_number(find(item, "item_line_total"))
+        unit_price = to_number(find(item, "item_price", platform)) or 0.0
+        line_total = to_number(find(item, "item_line_total", platform))
         items.append({
-            "id": to_text(find(item, "item_id")),
+            "id": to_text(find(item, "item_id", platform)),
             "title": title,
-            "sku": to_text(find(item, "item_sku")),
+            "sku": to_text(find(item, "item_sku", platform)),
             "quantity": quantity,
             "unit_price": money(unit_price, currency),
             "line_total": money(line_total if line_total is not None else unit_price * quantity, currency),
@@ -297,24 +265,27 @@ def string_address(raw: Any) -> str:
     return ""
 
 
-def normalize_order(raw: dict, shop: str) -> dict:
+async def normalize_order_async(raw: dict, shop: str, platform: str = "prom") -> dict:
+    """Головна асинхронна функція нормалізації замовлення з підтримкою AI Self-Healing та Супервізора."""
     if not isinstance(raw, dict):
         raw = {}
 
-    currency = to_text(find(raw, "currency")) or "UAH"
+    # Запускаємо асинхронну нормалізацію та самовідновлення полів через наш клас
+    await _normalizer.normalize_async(platform, raw)
+
+    currency = to_text(find(raw, "currency", platform)) or "UAH"
 
     billing = raw.get("billing", {}) if isinstance(raw.get("billing"), dict) else {}
     shipping = raw.get("shipping", {}) if isinstance(raw.get("shipping"), dict) else {}
 
-    # Заздалегідь підготовлені pre-split шляхи для частих витягів
     first = (
-        to_text(find(raw, "first_name")) 
+        to_text(find(raw, "first_name", platform)) 
         or to_text(get_path(raw, ("customer", "first_name")))
         or to_text(billing.get("first_name"))
         or to_text(shipping.get("first_name"))
     )
     last = (
-        to_text(find(raw, "last_name")) 
+        to_text(find(raw, "last_name", platform)) 
         or to_text(get_path(raw, ("customer", "last_name")))
         or to_text(billing.get("last_name"))
         or to_text(shipping.get("last_name"))
@@ -323,19 +294,19 @@ def normalize_order(raw: dict, shop: str) -> dict:
         " ".join(part for part in (first, last) if part) 
         or to_text(billing.get("company"))
         or to_text(get_path(raw, ("customer", "name")))
-        or to_text(find(raw, "customer_name"))
+        or to_text(find(raw, "customer_name", platform))
         or "Гість"
     )
 
     street = (
         to_text(get_path(raw, ("shipping_address", "address1"))) 
-        or to_text(find(raw, "street"))
+        or to_text(find(raw, "street", platform))
         or to_text(shipping.get("address_1"))
         or to_text(billing.get("address_1"))
     )
     street2 = (
         to_text(get_path(raw, ("shipping_address", "address2"))) 
-        or to_text(find(raw, "street2"))
+        or to_text(find(raw, "street2", platform))
         or to_text(shipping.get("address_2"))
         or to_text(billing.get("address_2"))
     )
@@ -343,45 +314,45 @@ def normalize_order(raw: dict, shop: str) -> dict:
 
     city = (
         to_text(get_path(raw, ("shipping_address", "city"))) 
-        or to_text(find(raw, "city"))
+        or to_text(find(raw, "city", platform))
         or to_text(shipping.get("city"))
         or to_text(billing.get("city"))
     )
     region = (
         to_text(get_path(raw, ("shipping_address", "province"))) 
-        or to_text(find(raw, "region"))
+        or to_text(find(raw, "region", platform))
         or to_text(shipping.get("state"))
         or to_text(billing.get("state"))
     )
     postal_code = (
         to_text(get_path(raw, ("shipping_address", "zip"))) 
-        or to_text(find(raw, "postal_code"))
+        or to_text(find(raw, "postal_code", platform))
         or to_text(shipping.get("postcode"))
         or to_text(billing.get("postcode"))
     )
     country = (
         to_text(get_path(raw, ("shipping_address", "country"))) 
-        or to_text(find(raw, "country"))
+        or to_text(find(raw, "country", platform))
         or to_text(shipping.get("country"))
         or to_text(billing.get("country"))
     )
     
     full_address = ", ".join(part for part in (country, region, city, full_street, postal_code) if part)
 
-    phone = to_text(find(raw, "phone")) or to_text(billing.get("phone")) or to_text(shipping.get("phone"))
-    email = to_text(find(raw, "email")) or to_text(billing.get("email")) or to_text(shipping.get("email"))
+    phone = to_text(find(raw, "phone", platform)) or to_text(billing.get("phone")) or to_text(shipping.get("phone"))
+    email = to_text(find(raw, "email", platform)) or to_text(billing.get("email")) or to_text(shipping.get("email"))
     chat_history = raw.get("chat_history") or raw.get("dialog_history") or ""
 
     base_dict = {
         "shop": shop,
-        "id": to_text(get_path(raw, ("id",))) or to_text(find(raw, "order_number")),
-        "order_number": to_text(find(raw, "order_number")),
-        "created_at": to_text(find(raw, "created_at")),
+        "id": to_text(get_path(raw, ("id",))) or to_text(find(raw, "order_number", platform)),
+        "order_number": to_text(find(raw, "order_number", platform)),
+        "created_at": to_text(find(raw, "created_at", platform)),
         "currency": currency.upper(),
         "customer_name": customer_name,
         "phone": phone,
         "email": email,
-        "delivery_method": to_text(find(raw, "delivery_method")),
+        "delivery_method": to_text(find(raw, "delivery_method", platform)),
         "delivery_address": {
             "street": full_street,
             "city": city,
@@ -390,11 +361,11 @@ def normalize_order(raw: dict, shop: str) -> dict:
             "country": country,
             "full": full_address,
         },
-        "total_amount": money(find(raw, "total_amount"), currency),
-        "items": normalize_items(find(raw, "items"), currency),
+        "total_amount": money(find(raw, "total_amount", platform), currency),
+        "items": normalize_items(find(raw, "items", platform), currency, platform),
         "status": {
-            "text": to_text(find(raw, "status")) or "В обробці",
-            "cancelled": bool(find(raw, "cancelled")),
+            "text": to_text(find(raw, "status", platform)) or "В обробці",
+            "cancelled": bool(find(raw, "cancelled", platform)),
         },
         "chat_history": str(chat_history),
     }
