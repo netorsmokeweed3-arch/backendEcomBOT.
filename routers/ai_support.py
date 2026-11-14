@@ -17,7 +17,7 @@ from database import (
 from redis_pool import get_redis
 from ai_service import analyze_order
 from agents import MultiAgentSystem
-from order_normalizer import normalize_order
+from order_normalizer import normalize_shop, normalize_order_async
 from nova_poshta import get_nova_poshta_tracking
 from ukrposhta import get_ukrposhta_tracking
 from worker import save_orders_to_db
@@ -124,7 +124,7 @@ async def receive_marketplace_webhook(
     try:
         payload = jsonlib.loads(body_bytes.decode("utf-8"))
         shop_domain = payload.get("shop") or payload.get("domain") or f"webhook-{platform}.local"
-        normalized_shop_domain = shop_domain
+        normalized_shop_domain = normalize_shop(shop_domain) or shop_domain
         
         store_stmt = select(StoreCredentialModel).where(StoreCredentialModel.shop_domain == normalized_shop_domain)
         store_record = await db.scalar(store_stmt)
@@ -157,8 +157,8 @@ async def process_ai(
     if not await check_rate_limit(f"user:{user_id}:ai", max_requests=20):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Перевищено ліміт запитів до ШІ.")
 
-    shop = payload.shop
-    order = payload.order_data if ("delivery_address" in payload.order_data) else normalize_order(payload.order_data, shop)
+    shop = normalize_shop(payload.shop) or payload.shop
+    order = payload.order_data if ("delivery_address" in payload.order_data) else await normalize_order_async(payload.order_data, shop)
     
     ai_report = await analyze_order(order, payload.chat_messages or "", user_id=user_id, shop_domain=shop)
     return {"success": True, "ai_report": ai_report}
@@ -174,7 +174,7 @@ async def chat_with_ai(
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Перевищено ліміт запитів до чату.")
 
     chat_id = payload.chat_id or "default_chat"
-    shop = payload.shop
+    shop = normalize_shop(payload.shop) or payload.shop
     
     mode_stmt = select(ChatModeModel).where(
         ChatModeModel.chat_id == chat_id,
