@@ -8,3 +8,7 @@ JWT_ACCESS_EXPIRATION_MINUTES = 15
 JWT_REFRESH_EXPIRATION_DAYS = 7
 BACKEND_VERSION = "2.0.0"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-webhook-secret-change-in-production")
+
+# --- SHADOWSOCKS ПРОКСІ КОНФІГУРАЦІЯ ---
+SHADOWSOCKS_ENABLED = os.getenv("SHADOWSOCKS_ENABLED", "false").lower() == "true"
+SHADOWSOCKS_PROXY_URL = os.getenv("SHADOWSOCKS_PROXY_URL", "socks5://127.0.0.1:1080")

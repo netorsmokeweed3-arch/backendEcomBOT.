@@ -13,6 +13,8 @@ import socket
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 
+from config import SHADOWSOCKS_ENABLED, SHADOWSOCKS_PROXY_URL
+
 logger = logging.getLogger(__name__)
 
 class OrderAPIError(Exception):
@@ -66,13 +68,18 @@ class BaseMarketplaceClient(abc.ABC):
             raise OrderAPIError("Помилка безпеки при перевірці домену.", 400)
 
     async def _make_request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Захищений асинхронний запит із перевіркою SSRF та ретраями."""
+        """Захищений асинхронний запит із перевіркою SSRF, підтримкою Shadowsocks проксі та ретраями."""
         await self._validate_url_ssrf(url)
+
+        client_kwargs = {"timeout": self.timeout}
+        if SHADOWSOCKS_ENABLED and SHADOWSOCKS_PROXY_URL:
+            client_kwargs["proxy"] = SHADOWSOCKS_PROXY_URL
+            logger.debug(f"Використовується Shadowsocks проксі для запиту до {self.shop_domain}")
 
         retry_delay = 1.0
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with httpx.AsyncClient(**client_kwargs) as client:
                     response = await client.request(method, url, **kwargs)
                     return response
             except (httpx.TimeoutException, httpx.RequestError) as error:

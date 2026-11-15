@@ -186,3 +186,11 @@ async def test_worker_save_orders_to_db():
         assert order is not None
         assert order.customer_name == "Іван Тест"
         assert order.total_amount == 1500.50
+
+
+
+
+
+
+
+        

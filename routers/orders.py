@@ -6,8 +6,11 @@ import hmac
 import hashlib
 import json as jsonlib
 import logging
+import csv
+import io
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Request, Depends, Header, status, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from pydantic import BaseModel, Field, field_validator
@@ -176,7 +179,7 @@ async def receive_marketplace_webhook(
 
 
 # ==========================================
-# 5. API ЕНДПОІНТИ ОТРИМАННЯ ЗАМОВЛЕНЬ
+# 5. API ЕНДПОІНТИ ОТРИМАННЯ ТА ЕКСПОРТУ ЗАМОВЛЕНЬ
 # ==========================================
 
 @router.post("", response_model=OrdersResponse, status_code=status.HTTP_200_OK)
@@ -236,6 +239,54 @@ async def get_orders(
     }
 
 
+@router.post("/export", status_code=status.HTTP_200_OK, tags=["Orders & Webhooks"])
+async def export_orders_csv(
+    payload: CredentialsSchema,
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Експортує всі замовлення магазину у форматі CSV для завантаження."""
+    if not await check_rate_limit(f"user:{user_id}:export", max_requests=10):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Перевищено ліміт запитів на експорт.")
+
+    shop = await verify_store_ownership(payload.shop, user_id, db)
+
+    orders_stmt = (
+        select(OrderModel)
+        .where(OrderModel.shop_domain == shop)
+        .order_by(desc(OrderModel.created_at))
+    )
+    db_orders = (await db.scalars(orders_stmt)).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Заголовки CSV таблиці
+    writer.writerow(["External ID", "Order Number", "Customer Name", "Phone", "Email", "Total Amount", "Currency", "Status", "Created At"])
+
+    for o in db_orders:
+        writer.writerow([
+            o.external_order_id,
+            o.order_number or "",
+            o.customer_name or "",
+            o.phone or "",
+            o.email or "",
+            o.total_amount,
+            o.currency,
+            o.status,
+            o.created_at.isoformat() if o.created_at else ""
+        ])
+
+    output.seek(0)
+    logger.info(f"Успішно згенеровано CSV експорт для магазину {shop} (user_id={user_id})")
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=orders_{shop}.csv"}
+    )
+
+
 @router.post("/multi", response_model=MultiOrdersResponse, status_code=status.HTTP_200_OK)
 async def get_orders_multi(
     limit: int = Query(100, ge=1, le=500, description="Загальний ліміт замовлень при мультизборі"),
@@ -285,7 +336,7 @@ async def get_orders_multi(
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
 
-    logger.info(f"Мультизбір успішний: отримано {len(all_orders)} замовлень з {len(shop_domains)} магазинів для user_id={user_id}")
+    logger.info(f"Мультизбір успішний: отримано {len(all_orders)} замовлень з {len(shop_domains)} магазинів for user_id={user_id}")
     return {
         "success": True, 
         "total_count": len(all_orders),
