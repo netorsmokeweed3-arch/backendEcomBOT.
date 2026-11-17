@@ -1,4 +1,10 @@
+import os
 import logging
+from dotenv import load_dotenv
+
+# Завантажуємо змінні середовища з файлу .env
+load_dotenv()
+
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, status
@@ -6,6 +12,19 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import select
+
+# --- ІНТЕГРАЦІЯ SENTRY ДЛЯ МОНІТОРИНГУ ПОМИЛОК ---
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+sentry_dsn = os.getenv("SENTRY_DSN")
+if sentry_dsn:
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        integrations=[FastApiIntegration()],
+        traces_sample_rate=1.0,
+        environment=os.getenv("ENVIRONMENT", "production"),
+    )
 
 from config import BACKEND_VERSION
 from deps import set_redis_client, get_redis
@@ -39,7 +58,7 @@ async def lifespan(app: FastAPI):
         logger.info("З'єднання з Redis успішно закрито.")
 
 
-# Створення основного FastAPI додатку (Enterprise Core)[cite: 18]
+# Створення основного FastAPI додатку
 app = FastAPI(
     title="Enterprise Marketplace Core API",
     version=BACKEND_VERSION,
@@ -54,6 +73,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- ТЕСТОВИЙ РОУТ ДЛЯ ПЕРЕВІРКИ SENTRY ---
+@app.get("/sentry-debug", tags=["System"])
+async def trigger_error():
+    """Спеціальний роут для генерації помилки та перевірки моніторингу Sentry."""
+    division_by_zero = 1 / 0
 
 
 # --- ЄДИНИЙ КОМПЛЕКСНИЙ HEALTH CHECK ---

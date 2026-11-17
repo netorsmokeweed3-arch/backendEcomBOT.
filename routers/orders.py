@@ -1,7 +1,3 @@
-"""Модуль управління замовленнями, вебхуками маркетплейсів та конвеєром AI-нормалізації (Enterprise Edition - Secured & Optimized).
-Інкапсулює криптографічну перевірку, захист від DoS, ідемпотентність через Redis, мультитенантність та AI Self-Healing.
-"""
-
 import hmac
 import hashlib
 import json as jsonlib
@@ -31,12 +27,17 @@ MAX_WEBHOOK_SIZE_BYTES = 512 * 1024
 
 
 # ==========================================
-# 1. КРИПТОГРАФІЧНА ЗАЛЕЖНІСТЬ ВЕБХУКІВ (Security Hardened)
+# 1. УНІВЕРСАЛЬНА КРИПТОГРАФІЧНА ЗАЛЕЖНІСТЬ ВЕБХУКІВ (Security Hardened)
 # ==========================================
 
 class VerifyWebhookSignature:
-    """Інкапсульована перевірка HMAC-SHA256 підпису вебхуків із захистом від переповнення пам'яті (DoS)."""
-    async def __call__(self, request: Request, x_webhook_signature: Optional[str] = Header(None)) -> bytes:
+    """Інкапсульована перевірка HMAC підпису вебхуків із захистом від переповнення пам'яті (DoS) та підтримкою Shopify/Prom."""
+    async def __call__(
+        self, 
+        request: Request, 
+        x_webhook_signature: Optional[str] = Header(None),
+        x_shopify_hmac_sha256: Optional[str] = Header(None)
+    ) -> bytes:
         content_length = request.headers.get("content-length")
         if content_length and int(content_length) > MAX_WEBHOOK_SIZE_BYTES:
             logger.warning(f"Спроба атаки великим payload: {content_length} байтів")
@@ -47,12 +48,13 @@ class VerifyWebhookSignature:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Розмір вебхука перевищує допустимий ліміт.")
         
         if WEBHOOK_SECRET:
-            if not x_webhook_signature:
+            incoming_signature = x_webhook_signature or x_shopify_hmac_sha256
+            if not incoming_signature:
                 logger.warning("Спроба запиту вебхука без криптографічного підпису")
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Відсутній криптографічний підпис вебхука.")
             
             expected_signature = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected_signature, x_webhook_signature):
+            if not hmac.compare_digest(expected_signature, incoming_signature):
                 logger.warning("Критично: невірний криптографічний підпис вебхука!")
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Невірний криптографічний підпис.")
                 
@@ -153,10 +155,7 @@ async def receive_marketplace_webhook(
             raw_order = payload.get("order") or payload
             
             if isinstance(raw_order, dict) and raw_order:
-                # 🚀 ОРКЕСТРАЦІЯ КОНВЕЄРА: Асинхронна нормалізація з Self-Healing
                 normalized_order_data = await normalize_order_async(raw_order, normalized_shop_domain, platform_key)
-                
-                # Зберігаємо нормалізоване замовлення в БД через єдиний воркер
                 await save_orders_to_db(db, user_id, normalized_shop_domain, [normalized_order_data])
             
             db.add(AuditLogModel(
@@ -261,7 +260,6 @@ async def export_orders_csv(
     output = io.StringIO()
     writer = csv.writer(output)
     
-    # Заголовки CSV таблиці
     writer.writerow(["External ID", "Order Number", "Customer Name", "Phone", "Email", "Total Amount", "Currency", "Status", "Created At"])
 
     for o in db_orders:
