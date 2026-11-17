@@ -1,4 +1,4 @@
 from .base import BaseAdapter
 
-class ShopifyAdapter(BaseAdapter):
+class CitrusAdapter(BaseAdapter):
     pass

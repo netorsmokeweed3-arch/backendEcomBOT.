@@ -8,45 +8,41 @@ from typing import List, Dict, Any
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-try:
-    from order_normalizer import normalize_order, OrderAPIError
-except ImportError:
-    def normalize_order(raw: dict, shop: str) -> dict:
-        return raw
-    class OrderAPIError(Exception):
-        def __init__(self, message: str, status: int = 400):
-            super().__init__(message)
-            self.status = status
+from order_normalizer import normalize_order_async
+from clients.base_client import OrderAPIError
 
+# Стандартні маркетплейси та CRM з папки clients/
 from clients.prom_client import PromClient
 from clients.rozetka_client import RozetkaClient
 from clients.woocommerce_client import WooCommerceClient
 from clients.shopify_client import ShopifyClient
-from clients.olx_client import OlxClient  # <-- Додано імпорт OLX
-
-# Імпорт решти публічних, enterprise та ритейл-клієнтів
-from retail_scrapers.artline_client import ArtlineClient
-from retail_scrapers.brain_client import BrainClient
-from clients.enterprise.citrus_client import CitrusClient
-from retail_scrapers.click_client import ClickClient
-from clients.enterprise.comfy_client import ComfyClient
-from clients.crafta_client import CraftaClient
-from clients.enterprise.eldorado_client import EldoradoClient
-from retail_scrapers.elmir_client import ElmirClient
-from clients.epicentr_client import EpicentrClient
-from retail_scrapers.exe_client import ExeClient
-from clients.enterprise.foxtrot_client import FoxtrotClient
+from clients.olx_client import OlxClient
 from clients.horoshop_client import HoroshopClient
 from clients.izi_client import IziClient
 from clients.keycrm_client import KeyCrmClient
 from clients.kidstaff_client import KidstaffClient
-from retail_scrapers.kv_client import KvClient
-from clients.enterprise.moyo_client import MoyoClient
 from clients.remonline_client import RemonlineClient
 from clients.shafa_client import ShafaClient
 from clients.sqsp_client import SqspClient
-from retail_scrapers.telemart_client import TelemartClient
 from clients.weblium_client import WebliumClient
+from clients.epicentr_client import EpicentrClient
+from clients.crafta_client import CraftaClient
+# Enterprise та ритейл-клієнти (частково в enterprise, частково в retail_scrapers)
+from clients.enterprise.citrus_client import CitrusClient
+from clients.enterprise.comfy_client import ComfyClient
+from clients.enterprise.eldorado_client import EldoradoClient
+from clients.enterprise.foxtrot_client import FoxtrotClient
+from clients.enterprise.moyo_client import MoyoClient
+
+# Ритейл-скрейпери з папки retail_scrapers/
+from retail_scrapers.artline_client import ArtlineClient
+from retail_scrapers.brain_client import BrainClient
+from retail_scrapers.click_client import ClickClient
+from retail_scrapers.elmir_client import ElmirClient
+from retail_scrapers.exe_client import ExeClient
+from retail_scrapers.kv_client import KvClient
+from retail_scrapers.telemart_client import TelemartClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +59,7 @@ class MarketplaceDispatcher:
             "woo": WooCommerceClient,
             "woocommerce": WooCommerceClient,
             "shopify": ShopifyClient,
-            "olx": OlxClient,  # <-- Зареєстровано OLX у словнику
+            "olx": OlxClient,
             "artline": ArtlineClient,
             "brain": BrainClient,
             "citrus": CitrusClient,
@@ -109,10 +105,11 @@ class MarketplaceDispatcher:
                 logger.info(f"Починаємо опитування магазину: {shop_domain} ({platform}) [Last synced: {last_synced_at}]")
                 raw_orders = await client.fetch_orders()
                 
-                normalized = [
-                    normalize_order(order, shop_domain)
-                    for order in raw_orders if isinstance(order, dict)
-                ]
+                normalized = []
+                for order in raw_orders:
+                    if isinstance(order, dict):
+                        norm_order = await normalize_order_async(order, shop_domain, platform)
+                        normalized.append(norm_order)
                 return normalized
             except OrderAPIError:
                 raise

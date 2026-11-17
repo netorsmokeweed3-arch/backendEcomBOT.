@@ -7,11 +7,12 @@ load_dotenv()
 
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, status
+from fastapi import FastAPI, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import select
+import httpx
 
 # --- ІНТЕГРАЦІЯ SENTRY ДЛЯ МОНІТОРИНГУ ПОМИЛОК ---
 import sentry_sdk
@@ -36,6 +37,28 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Отримуємо дані для Telegram-сповіщень
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+async def send_telegram_alert(error_message: str):
+    """Асинхронно надсилає сповіщення про критичну помилку в Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": f"🚨 **Критична помилка на сервері OmniFlow!**\n\n`{error_message}`",
+        "parse_mode": "Markdown"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(url, json=payload)
+    except Exception as e:
+        logger.error(f"Не вдалося надіслати сповіщення в Telegram: {e}")
 
 
 @asynccontextmanager
@@ -75,11 +98,19 @@ app.add_middleware(
 )
 
 
-# --- ТЕСТОВИЙ РОУТ ДЛЯ ПЕРЕВІРКИ SENTRY ---
-@app.get("/sentry-debug", tags=["System"])
-async def trigger_error():
-    """Спеціальний роут для генерації помилки та перевірки моніторингу Sentry."""
-    division_by_zero = 1 / 0
+# --- ГЛОБАЛЬНИЙ ОБРОБНИК КРИТИЧНИХ ПОМИЛОК ІЗ TELEGRAM-СПОВІЩЕННЯМ ---
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_desc = f"{type(exc).__name__}: {str(exc)} (Path: {request.url.path})"
+    logger.error(f"Неопрацьована помилка: {error_desc}", exc_info=True)
+    
+    # Надсилаємо сповіщення в Telegram
+    await send_telegram_alert(error_desc)
+    
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"success": False, "detail": "Внутрішня помилка сервера."}
+    )
 
 
 # --- ЄДИНИЙ КОМПЛЕКСНИЙ HEALTH CHECK ---
