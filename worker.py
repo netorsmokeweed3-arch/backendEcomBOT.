@@ -296,7 +296,7 @@ async def background_store_monitor_loop() -> None:
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
                         last_morning_report_day = current_date
                         await send_push_notification(
-                            "🌅 Ранковий звіт EcomBOT",
+                            "🌅 Ранковий звіт OmniFlow",
                             "Штучний інтелект перевірив підключені магазини. Все працює стабільно! ☕"
                         )
 
@@ -305,7 +305,7 @@ async def background_store_monitor_loop() -> None:
                     if await acquire_distributed_lock(lock_key, expire_seconds=300):
                         last_evening_report_day = current_date
                         await send_push_notification(
-                            "🌙 Вечірній підсумок EcomBOT",
+                            "🌙 Вечірній підсумок OmniFlow",
                             "Підсумки дня: система працює в штатному режимі. Гарного відпочинку! 🛋️"
                         )
 
