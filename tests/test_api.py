@@ -61,7 +61,7 @@ async def test_user_registration_and_login(async_client):
         "email": unique_email,
         "password": "SecurePassword123!"
     })
-    assert reg_response.status_code == 200
+    assert reg_response.status_code == 201
     data = reg_response.json()
     assert data["success"] is True
     assert "access_token" in data

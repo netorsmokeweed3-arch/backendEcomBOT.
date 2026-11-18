@@ -4,11 +4,10 @@
 
 import json
 import logging
-import asyncio
 import hashlib
 from typing import Optional, Dict, Any
 from redis_pool import get_redis
-from agents import MultiAgentSystem, fetch_realtime_currency_rates
+from agents import MultiAgentSystem, fetch_realtime_currency_rates, MODEL as AI_MODEL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +106,8 @@ def standard_fields(order: dict) -> dict:
         "items": formatted_items,
         "ai_summary": "",
         "chat_summary": str(safe_order.get("chat_history", "")),
-        "market_currency_data": {}
+        "market_currency_data": {},
+        "ai_model_used": AI_MODEL_NAME
     }
 
 
@@ -161,12 +161,13 @@ async def analyze_order(
 ) -> dict:
     """Головна точка входу з інтегрованим ізольованим по tenant/user Redis-кешуванням відповідей ШІ."""
     
-    # Захист від крос-тенантної колізії: включаємо user_id та shop_domain у ключ кешу
+    # Захист від крос-тенантної колізії: включаємо user_id та shop_domain у ключ кешу разом із моделлю
     cache_payload = json.dumps({
         "user_id": user_id,
         "shop_domain": shop_domain,
         "order": order,
-        "chat": chat_messages
+        "chat": chat_messages,
+        "model": AI_MODEL_NAME
     }, sort_keys=True, ensure_ascii=False)
     
     cache_key = f"ai_cache:{hashlib.sha256(cache_payload.encode('utf-8')).hexdigest()}"
@@ -176,7 +177,7 @@ async def analyze_order(
         try:
             cached_result = await redis.get(cache_key)
             if cached_result:
-                logger.info("⚡ Знайдено ізольовану кешовану відповідь ШІ у Redis (економія токенів).")
+                logger.info(f"⚡ Знайдено ізольовану кешовану відповідь ШІ у Redis (модель: {AI_MODEL_NAME}).")
                 return json.loads(cached_result)
         except Exception as e:
             logger.warning(f"Помилка читання кешу з Redis: {e}")
@@ -191,7 +192,7 @@ async def analyze_order(
     try:
         if is_chat_request:
             reply_text = await MultiAgentSystem.run_sales_agent(chat_messages, "")
-            result = {"recommendation": reply_text, "ai_summary": reply_text}
+            result = {"recommendation": reply_text, "ai_summary": reply_text, "ai_model_used": AI_MODEL_NAME}
         else:
             if not report.get("order_number") or not report.get("customer_name"):
                 raw_str = json.dumps(order, ensure_ascii=False)
@@ -207,7 +208,7 @@ async def analyze_order(
 
             chat_sum = extracted.get("chat_summary")
             if isinstance(chat_sum, str) and chat_sum.strip():
-                report["chat_summary"] = " ".join(chat_sum.split())
+                report["chat_summary"] = " ".join(chat_sum.strip().split())
 
             result = report
 
@@ -220,8 +221,8 @@ async def analyze_order(
         return result
 
     except Exception as error:
-        logger.error("[ERROR] Помилка обробки замовлення через агента: %s", error, exc_info=True)
+        logger.error("[ERROR] Помилка обробки замовлення через агента (модель %s): %s", AI_MODEL_NAME, error, exc_info=True)
         if is_chat_request:
-            return {"recommendation": "Вітаю! У мене невеликий технічний збій, але я готовий допомогти."}
+            return {"recommendation": "Вітаю! У мене невеликий технічний збій, але я готовий допомогти.", "ai_model_used": AI_MODEL_NAME}
         report["ai_summary"] = "ШІ тимчасово недоступний. Перевірте замовлення вручну."
         return report

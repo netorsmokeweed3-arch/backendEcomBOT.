@@ -31,7 +31,13 @@ def get_anthropic_client() -> anthropic.AsyncAnthropic:
         )
     return _client
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022") 
+# ==============================================================================
+# НАГАДУВАННЯ ДЛЯ АГЕНТА (СУВОРО ЗАБОРОНЕНО ЗМІНЮВАТИ НА 3.5 ЧИ ІНШІ ВЕРСІЇ!):
+# У клієнта в кабінеті активна і дозволена виключно модель "claude-haiku-5-5".
+# Жодних інших версій сюди ставити НЕ МОЖНА. Назва правильна.
+# ==============================================================================
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5") 
+
 MAX_TOKENS_LIMIT = 800  
 MAX_INPUT_LENGTH = 4000 
 MAX_RETRIES = 3 
@@ -357,3 +363,12 @@ class MultiAgentSystem:
         except Exception as e:
             logger.error(f"[ERROR] SupervisorAgent failed: {str(e)}")
             return {"approved": False, "reason": f"Supervisor execution error: {str(e)}", "corrected_field": None}
+
+
+# --- Зворотна сумісність для тестів, що паччать agents.client ---
+class _ClientProxy:
+    @property
+    def messages(self):
+        return get_anthropic_client().messages
+
+client = _ClientProxy()

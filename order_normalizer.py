@@ -5,6 +5,7 @@
 import re
 import logging
 import json
+import asyncio
 from typing import Any, Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -16,7 +17,6 @@ from adapters.keycrm import KeyCrmAdapter
 from adapters.remonline import RemonlineAdapter
 from adapters.epicentr import EpicentrAdapter
 
-# Імпортуємо систему агентів та Redis для кешування мапінгів
 from agents import MultiAgentSystem
 from redis_pool import get_redis
 
@@ -222,7 +222,15 @@ def to_number(value: Any) -> Optional[float]:
     if isinstance(value, dict):
         return to_number(value.get("amount", value.get("value")))
     try:
-        return float(str(value).replace(",", ".").strip())
+        val_str = str(value).strip().replace(" ", "")
+        # Обробка форматів типу "1,500.50" або "1500,50"
+        if "," in val_str and "." in val_str:
+            val_str = val_str.replace(",", "")
+        elif val_str.count(",") == 1 and val_str.count(".") == 0:
+            val_str = val_str.replace(",", ".")
+        elif val_str.count(",") > 1:
+            val_str = val_str.replace(",", "")
+        return float(val_str)
     except ValueError:
         return None
 
@@ -384,3 +392,24 @@ async def normalize_order_async(raw: dict, shop: str, platform: str = "prom") ->
     except ValidationError as ve:
         logger.error(f"Pydantic Validation Error for shop {shop}: {ve.errors()}")
         return base_dict
+
+
+def normalize_order(raw: dict, shop: str, platform: str = "prom") -> dict:
+    """Синхронна обгортка для зворотної сумісності зі старими тестами та викликами."""
+    try:
+        return asyncio.run(normalize_order_async(raw, shop, platform))
+    except RuntimeError:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                return asyncio.run_coroutine_threadsafe(
+                    normalize_order_async(raw, shop, platform), loop
+                ).result()
+        except Exception:
+            pass
+        # У крайньому випадку створюємо новий цикл
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(normalize_order_async(raw, shop, platform))
+        finally:
+            new_loop.close()

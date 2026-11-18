@@ -5,12 +5,13 @@ from dotenv import load_dotenv
 # Завантажуємо змінні середовища з файлу .env
 load_dotenv()
 
+# --- Експорт секрету верифікації вебхуків для тестів та роутерів ---
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "test-webhook-secret-key-12345")
+
 from contextlib import asynccontextmanager
-from typing import Optional
 from fastapi import FastAPI, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from redis.asyncio import Redis
 from sqlalchemy import select
 import httpx
 
@@ -28,7 +29,7 @@ if sentry_dsn:
     )
 
 from config import BACKEND_VERSION
-from deps import set_redis_client, get_redis
+from redis_pool import get_redis, close_redis
 from database import AsyncSessionLocal
 
 # Налаштування структурованого логування
@@ -63,22 +64,17 @@ async def send_telegram_alert(error_message: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Життєвий цикл додатку: ініціалізація та закриття з'єднань з Redis."""
-    redis_client: Optional[Redis] = None
-    try:
-        redis_client = Redis(host="localhost", port=6379, decode_responses=True)
-        await redis_client.ping()
-        logger.info("Успішно підключено до Redis.")
-    except Exception as e:
-        logger.warning(f"Не вдалося підключитися до Redis (ліміти працюватимуть у фолбек-режимі): {e}")
-        redis_client = None
-
-    set_redis_client(redis_client)
+    """Життєвий цикл додатку: ініціалізація та закриття пулу Redis."""
+    redis = await get_redis()
+    if redis:
+        logger.info("Успішно підключено до Redis через єдиний пул з'єднань.")
+    else:
+        logger.warning("Не вдалося підключитися до Redis (ліміти працюватимуть у фолбек-режимі).")
+    
     yield
 
-    if redis_client:
-        await redis_client.close()
-        logger.info("З'єднання з Redis успішно закрито.")
+    await close_redis()
+    logger.info("З'єднання з Redis успішно закрито при зупинці сервера.")
 
 
 # Створення основного FastAPI додатку
