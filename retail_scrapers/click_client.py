@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class ClickClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        api_key = self.credentials.get("api_key", "")
+        api_key = self.credentials.get("api_key", "") or self.credentials.get("api_token", "") or self.credentials.get("token", "")
         if not api_key:
             raise OrderAPIError("Відсутній ключ для Click.", 400)
 

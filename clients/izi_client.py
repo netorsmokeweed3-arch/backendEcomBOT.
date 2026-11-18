@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 class IziClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        # Оновлено для підтримки і api_token, і token
+        token = self.credentials.get("api_token") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній токен IZI.ua.", 400)
 

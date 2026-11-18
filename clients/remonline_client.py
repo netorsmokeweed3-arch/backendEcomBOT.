@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class RemonlineClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        api_key = self.credentials.get("api_key", "") or self.credentials.get("token", "")
+        api_key = self.credentials.get("api_key", "") or self.credentials.get("api_token", "") or self.credentials.get("token", "")
         if not api_key:
             raise OrderAPIError("Відсутній API-ключ для RemOnline.", 400)
 
@@ -14,7 +14,6 @@ class RemonlineClient(BaseMarketplaceClient):
         params = {"api_key": api_key}
         
         if self.last_synced_at:
-            # RemOnline приймає timestamp або дату в певних форматах
             params["updated_since"] = self.last_synced_at
 
         try:

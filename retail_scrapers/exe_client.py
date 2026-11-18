@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class ExeClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        token = self.credentials.get("api_token", "") or self.credentials.get("token", "") or self.credentials.get("api_key", "")
         if not token:
             raise OrderAPIError("Відсутній токен EXE.ua.", 400)
 

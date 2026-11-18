@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class FoxtrotClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        token = self.credentials.get("api_token") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній токен Foxtrot API.", 400)
 

@@ -1,3 +1,4 @@
+
 import logging
 from typing import List, Dict, Any
 from clients.base_client import BaseMarketplaceClient, OrderAPIError
@@ -6,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 class ShafaClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        token = self.credentials.get("api_token") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній токен Shafa.ua.", 400)
 

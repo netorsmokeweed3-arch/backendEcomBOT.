@@ -6,11 +6,11 @@ logger = logging.getLogger(__name__)
 
 class BrainClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        api_key = self.credentials.get("api_key", "") or self.credentials.get("token", "")
+        api_key = self.credentials.get("api_key", "") or self.credentials.get("api_token", "") or self.credentials.get("token", "")
         if not api_key:
             raise OrderAPIError("Відсутній ключ доступу для Brain API.", 400)
 
-        url = "https://api.brain.org.ua/orders" # Або корпоративний ендпоінт
+        url = "https://api.brain.org.ua/orders"
         headers = {"X-Brain-API-Key": api_key}
         
         all_orders = []

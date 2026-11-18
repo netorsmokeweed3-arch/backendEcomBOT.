@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 class GenericTokenClient(BaseMarketplaceClient):
     """Базовий клас для платформ, що використовують стандартний Token/Bearer запит."""
     
-    # Дочірні класи можуть перевизначати цей URL за потреби
     base_endpoint: Optional[str] = None
-    token_credential_keys: tuple = ("token", "access_token", "api_key", "bearer_token")
+    # Додано "api_token" на перше місце, оскільки більшість українських маркетплейсів використовують саме його
+    token_credential_keys: tuple = ("api_token", "token", "access_token", "api_key", "bearer_token")
 
     def _extract_token(self) -> str:
         """Безпечно витягує токен з різних можливих ключів у credentials."""
@@ -28,7 +28,6 @@ class GenericTokenClient(BaseMarketplaceClient):
         if not token:
             raise OrderAPIError(f"Відсутній або невалідний токен доступу для магазину «{self.shop_domain}».", 400)
 
-        # Якщо base_endpoint не задано спеціально, формуємо стандартний шлях на основі домену
         url = self.base_endpoint or f"https://{self.shop_domain}/api/v1/orders"
         
         headers = {
@@ -53,7 +52,6 @@ class GenericTokenClient(BaseMarketplaceClient):
                 logger.error(f"Невалідний JSON від {self.shop_domain}: {json_err}")
                 raise OrderAPIError("Маркетплейс повернув некоректну відповідь (не JSON).", 502) from json_err
 
-            # Універсальне витягування масиву замовлень із різних форматів відповіді
             if isinstance(data, list):
                 return data
             
@@ -62,11 +60,8 @@ class GenericTokenClient(BaseMarketplaceClient):
                     val = data.get(key)
                     if isinstance(val, list):
                         return val
-                # Якщо бекенд повернув єдиний об'єкт замовлення без обгортки масиву
                 if any(k in data for k in ("id", "order_id", "number", "orderNumber")):
                     return [data]
-
-            return []
 
             return []
 

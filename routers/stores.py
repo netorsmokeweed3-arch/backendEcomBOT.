@@ -21,6 +21,8 @@ class StoreCreateSchema(BaseModel):
     platform: str = Field(default="prom", min_length=2, max_length=50, description="Платформа маркетплейсу")
     token: Optional[str] = Field(default=None, max_length=1000)
     access_token: Optional[str] = Field(default=None, max_length=1000)
+    api_token: Optional[str] = Field(default=None, max_length=1000)
+    api_key: Optional[str] = Field(default=None, max_length=1000)
     consumer_key: Optional[str] = Field(default=None, max_length=1000)
     consumer_secret: Optional[str] = Field(default=None, max_length=1000)
 
@@ -64,7 +66,9 @@ async def add_store(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некоректний домен магазину.")
     
     credentials = {
-        "token": payload.token or payload.access_token or "",
+        "token": payload.token or payload.access_token or payload.api_token or "",
+        "api_token": payload.api_token or payload.token or payload.access_token or "",
+        "api_key": payload.api_key or "",
         "consumer_key": payload.consumer_key or "",
         "consumer_secret": payload.consumer_secret or "",
     }

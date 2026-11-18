@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 class CraftaClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        # Підтримуємо обидва ключі: і новий api_token з констант фронтенду, і старий token
+        token = self.credentials.get("api_token") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній токен Crafta.", 400)
 

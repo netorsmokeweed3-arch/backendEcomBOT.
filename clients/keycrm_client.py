@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 class KeyCrmClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "") or self.credentials.get("api_key", "")
+        # Додано підтримку api_token поряд з api_key та token
+        token = self.credentials.get("api_token") or self.credentials.get("api_key", "") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній API-ключ для KeyCRM.", 400)
 
@@ -33,7 +34,6 @@ class KeyCrmClient(BaseMarketplaceClient):
                     break
                 all_orders.extend(orders)
                 
-                # Перевірка пагінації KeyCRM
                 meta = data.get("meta", {})
                 current_page = meta.get("current_page", page)
                 last_page = meta.get("last_page", page)

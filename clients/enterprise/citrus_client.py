@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class CitrusClient(BaseMarketplaceClient):
     async def fetch_orders(self) -> List[Dict[str, Any]]:
-        token = self.credentials.get("token", "")
+        token = self.credentials.get("api_token") or self.credentials.get("token", "")
         if not token:
             raise OrderAPIError("Відсутній токен для Citrus.", 400)
 
