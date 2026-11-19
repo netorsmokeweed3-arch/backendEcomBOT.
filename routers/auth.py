@@ -125,13 +125,13 @@ def create_token(sub: str, token_type: str, expires_delta: timedelta) -> str:
 
 async def _send_code_via_brevo(to_email: str, code: str) -> None:
     if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
-        raise RuntimeError("Не налаштовано BREVO_API_KEY або адресу відправника.")
+        raise RuntimeError("Не налаштовано BREVO_API_KEY або адресу відправника..")
 
     payload = {
         "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
         "to": [{"email": to_email}],
-        "subject": f"Ваш код входу в OmniFlow: {code}",
-        "textContent": f"Ваш 4-значний код для входу в акаунт: {code}\nКод дійсний 10 хвилин.",
+        "subject": f"Ваш код входу в OmniFlow: {code}..",
+        "textContent": f"Ваш 4-значний код для входу в акаунт: {code}\nКод дійсний 10 хвилин...",
     }
     headers = {
         "api-key": BREVO_API_KEY,
@@ -192,8 +192,8 @@ async def send_code(payload: SendCodeSchema):
         await _send_code_via_brevo(clean_email, code)
     except Exception as e:
         logger.error(f"Помилка відправки коду на {clean_email}: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не вдалося надіслати код на email.")
-    return {"success": True, "message": "Код надіслано на пошту."}
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не вдалося надіслати код на email..")
+    return {"success": True, "message": "Код надіслано на пошту.."}
 
 
 @router.post("/verify-code", response_model=AuthResponse, status_code=status.HTTP_200_OK, dependencies=[Depends(RateLimitChecker("verify_code", 10))])
