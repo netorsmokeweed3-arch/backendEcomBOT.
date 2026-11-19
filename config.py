@@ -4,8 +4,8 @@ import os
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production")
 JWT_ALGORITHM = "HS256"
-JWT_ACCESS_EXPIRATION_MINUTES = 15
-JWT_REFRESH_EXPIRATION_DAYS = 7
+JWT_ACCESS_EXPIRATION_MINUTES = int(os.getenv("JWT_ACCESS_EXPIRATION_MINUTES", "720"))
+JWT_REFRESH_EXPIRATION_DAYS = int(os.getenv("JWT_REFRESH_EXPIRATION_DAYS", "90"))
 BACKEND_VERSION = "2.0.0"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-webhook-secret-change-in-production")
 
