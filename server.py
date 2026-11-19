@@ -1,5 +1,7 @@
 import os
 import logging
+from datetime import datetime, timezone
+from typing import Optional
 from dotenv import load_dotenv
 
 # Завантажуємо змінні середовища з файлу .env
@@ -30,7 +32,8 @@ if sentry_dsn:
 
 from config import BACKEND_VERSION
 from redis_pool import get_redis, close_redis
-from database import AsyncSessionLocal
+from database import AsyncSessionLocal, FieldMappingModel
+from ai_service import configure_self_healing_storage
 
 # Налаштування структурованого логування
 logging.basicConfig(
@@ -44,11 +47,53 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
+async def load_field_mapping(platform: str, raw_key: str) -> Optional[str]:
+    """Завантажує затверджений мапінг поля з БД."""
+    async with AsyncSessionLocal() as db:
+        stmt = select(FieldMappingModel.report_field).where(
+            FieldMappingModel.platform == platform,
+            FieldMappingModel.raw_key == raw_key,
+        )
+        return await db.scalar(stmt)
+
+
+async def save_field_mapping(
+    platform: str,
+    raw_key: str,
+    report_field: Optional[str],
+    confidence: float,
+    reason: str,
+) -> None:
+    """Зберігає або оновлює затверджений мапінг поля у БД."""
+    async with AsyncSessionLocal() as db:
+        stmt = select(FieldMappingModel).where(
+            FieldMappingModel.platform == platform,
+            FieldMappingModel.raw_key == raw_key,
+        )
+        existing = await db.scalar(stmt)
+        if existing:
+            existing.report_field = report_field
+            existing.confidence = confidence
+            existing.reason = reason
+            existing.updated_at = datetime.now(timezone.utc)
+        else:
+            db.add(
+                FieldMappingModel(
+                    platform=platform,
+                    raw_key=raw_key,
+                    report_field=report_field,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
+        await db.commit()
+
+
 async def send_telegram_alert(error_message: str):
     """Асинхронно надсилає сповіщення про критичну помилку в Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -64,13 +109,19 @@ async def send_telegram_alert(error_message: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Життєвий цикл додатку: ініціалізація та закриття пулу Redis."""
+    """Життєвий цикл додатку: ініціалізація та закриття пулу Redis та сховища мапінгів."""
+    configure_self_healing_storage(
+        load_fn=load_field_mapping,
+        save_fn=save_field_mapping,
+    )
+    logger.info("Підключено персистентне сховище Self-Healing мапінгів (field_mappings).")
+
     redis = await get_redis()
     if redis:
         logger.info("Успішно підключено до Redis через єдиний пул з'єднань.")
     else:
         logger.warning("Не вдалося підключитися до Redis (ліміти працюватимуть у фолбек-режимі).")
-    
+
     yield
 
     await close_redis()
@@ -99,10 +150,10 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     error_desc = f"{type(exc).__name__}: {str(exc)} (Path: {request.url.path})"
     logger.error(f"Неопрацьована помилка: {error_desc}", exc_info=True)
-    
+
     # Надсилаємо сповіщення в Telegram
     await send_telegram_alert(error_desc)
-    
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"success": False, "detail": "Внутрішня помилка сервера."}
@@ -114,7 +165,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def health_check() -> JSONResponse:
     """Детальна перевірка здоров'я підсистем ШІ, бази даних та Redis."""
     checks = {"api": "ok", "database": "unknown", "redis": "unknown"}
-    
+
     try:
         async with AsyncSessionLocal() as db:
             await db.scalar(select(1))
@@ -122,7 +173,7 @@ async def health_check() -> JSONResponse:
     except Exception as e:
         logger.error(f"Health check DB error: {e}")
         checks["database"] = "error"
-    
+
     redis = await get_redis()
     if redis:
         try:
@@ -133,10 +184,10 @@ async def health_check() -> JSONResponse:
             checks["redis"] = "error"
     else:
         checks["redis"] = "not_configured"
-        
+
     status_code = status.HTTP_200_OK if checks["database"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(
-        status_code=status_code, 
+        status_code=status_code,
         content={
             "status": "healthy" if status_code == 200 else "degraded",
             "version": BACKEND_VERSION,

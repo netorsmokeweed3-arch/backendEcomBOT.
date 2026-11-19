@@ -28,11 +28,13 @@ try:
 except Exception as e:
     raise RuntimeError(f"КРИТИЧНА ПОМИЛКА: Невалідний формат APP_ENCRYPTION_KEY для Fernet: {e}")
 
+
 def encrypt_credential(plain_text: str) -> str:
     """Шифрує рядок перед збереженням у базу даних."""
     if not plain_text:
         return ""
     return cipher_suite.encrypt(plain_text.encode("utf-8")).decode("utf-8")
+
 
 def decrypt_credential(encrypted_text: str) -> str:
     """Розшифровує рядок із бази даних із перехопленням криптографічних виключень."""
@@ -43,6 +45,7 @@ def decrypt_credential(encrypted_text: str) -> str:
     except Exception as e:
         logger.critical(f"КРИТИЧНА ПОМИЛКА ШИФРУВАННЯ БД: Неможливо розшифрувати дані. Деталі: {e}")
         raise
+
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ecom_database.db")
 
@@ -84,13 +87,14 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False
 )
 
+
 class Base(DeclarativeBase):
     pass
 
 
 class UserModel(Base):
     __tablename__ = "users"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -98,7 +102,7 @@ class UserModel(Base):
 
 class PushTokenModel(Base):
     __tablename__ = "push_tokens"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     token: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
@@ -107,7 +111,7 @@ class PushTokenModel(Base):
 class ChatModeModel(Base):
     """Модель режимів чату зі складовим первинним ключем для запобігання tenant-колізіям."""
     __tablename__ = "chat_modes"
-    
+
     chat_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     mode: Mapped[str] = mapped_column(String(20), default="ai", nullable=False)
@@ -119,7 +123,7 @@ class ChatModeModel(Base):
 
 class StoreCredentialModel(Base):
     __tablename__ = "store_credentials"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
@@ -131,7 +135,7 @@ class StoreCredentialModel(Base):
 class OrderModel(Base):
     """Персистентна таблиця замовлень для кешування, аналітики та інкрементальної синхронізації."""
     __tablename__ = "orders"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
@@ -156,7 +160,7 @@ class OrderModel(Base):
 class OrderItemModel(Base):
     """Товари у складі замовлення."""
     __tablename__ = "order_items"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True, nullable=False)
     sku: Mapped[str] = mapped_column(String(100), index=True, nullable=True)
@@ -170,7 +174,7 @@ class OrderItemModel(Base):
 class AuditLogModel(Base):
     """Таблиця для логування подій та помилок інтеграції з маркетплейсами."""
     __tablename__ = "audit_logs"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     shop_domain: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
@@ -179,7 +183,30 @@ class AuditLogModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class FieldMappingModel(Base):
+    """Персистентний кеш затверджених мапінгів полів маркетплейсів (Self-Healing + Supervisor)."""
+    __tablename__ = "field_mappings"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    platform: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    raw_key: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    report_field: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("platform", "raw_key", name="uq_platform_raw_key"),
+    )
+
+
 AUTO_CREATE_TABLES = os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true"
+
 
 async def init_db() -> None:
     """Ініціалізація схеми БД (якщо не використовується Alembic)."""
